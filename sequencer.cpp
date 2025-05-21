@@ -206,7 +206,9 @@ void seq::nextStep()
 
     //Set velocity/accent
     uint8_t baseVel = trVel.prospectiveSequence[curStep] ? pots.velocity : 0;
-    if (trAcc.prospectiveSequence[curStep]) baseVel = pots.accentVel;   // accent hit
+    if (trAcc.prospectiveSequence[curStep] && baseVel > 0) {
+         baseVel = pots.accentVel;   // accent hit
+    }
     uint8_t midiVel = constrain(baseVel, 0, 127);
 
 
