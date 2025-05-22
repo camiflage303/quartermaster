@@ -9,6 +9,11 @@ namespace seq {
     void init();
     void nextStep();
     void forceStep(uint8_t step);   // 0-15
+    void regenerateAll(uint8_t probability);
+    void commitProspect();
+    void rotateAllLeft();
+    void rotateAllRight();
+    void armReset();
 
     /* expose read-only state for UI */
     uint8_t stepNow();               // 0-15

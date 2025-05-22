@@ -19,6 +19,33 @@ void loop()
 {
     hw::scanInputs();
 
+    if (hw::btnInstant.edge) {                         //   BTN_INST
+        seq::regenerateAll(hw::pots.instChance);       //   make 16 new prospect notes
+        seq::commitProspect();                         //   and commit at once
+    }
+
+    if (hw::btnCopy.edge) {                            //   BTN_NONDEST
+        seq::commitProspect();                         //   promote last 16 temp steps
+    }
+
+    /* ----------------------------------------------
+   Immediate performance buttons
+   ---------------------------------------------- */
+    if (hw::btnCycleL.edge) {
+        seq::rotateAllLeft();
+        //flashLed(3, {0,60,0});            // same green wink
+    }
+
+    if (hw::btnCycleR.edge) {
+        seq::rotateAllRight();
+        //flashLed(5, {0,60,0});
+    }
+
+    if (hw::btnReset.edge) {
+        seq::armReset();                  // will take effect on next tick
+        //flashLed(4, {0,0,60});            // blue wink
+    }
+
     static bool prevOn = false;
     bool        on     = hw::btnOnOff.level;
 
@@ -88,5 +115,5 @@ void dbgPrint()
     if (pendingEdge) Serial.print(F("  [EDGE]"));
     Serial.println();
 
-    pendingEdge = false;   // clear after showing
+    pendingEdge = false;   // clear after showing*/
 }

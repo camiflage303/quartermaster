@@ -66,9 +66,9 @@ static void paintStaticRegion()
 void ui::refresh()
 {
     /* flash on edges ------------------------------------------------ */
-if(hw::btnCycleL.edge) flashLed(3, {0,60,0});       // green
-if(hw::btnCycleR.edge) flashLed(5, {0,60,0});
-if(hw::btnReset .edge) flashLed(4, {0, 0,60});      // blue
+//if(hw::btnCycleL.edge) flashLed(3, {0,60,0});       // green
+//if(hw::btnCycleR.edge) flashLed(5, {0,60,0});
+//if(hw::btnReset .edge) flashLed(4, {0, 0,60});      // blue
 
     
     /* 1. detect whether static region must be repainted ── */

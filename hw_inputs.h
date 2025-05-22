@@ -1,6 +1,8 @@
 #pragma once
 #include <Arduino.h>
 
+#define DBG_PITCH    1        // ← set 0 to silence all pitch prints
+
 namespace hw {
 
 struct PotValues {

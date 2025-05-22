@@ -124,13 +124,25 @@ void hw::scanInputs()
     /* 8-B  map raw pots to 0-100/127/…, fill PotValues -------------- */
     auto pot = [&](InIdx idx){ return inputs[idx].lastVal; };
 
-    for(int i=0;i<8;i++)       
-        pots.pitchProb[i] = map(pot(InIdx(IDX_SLIDE_1+i)), 0,1024, 127,-1);
+    pots.pitchProb[0]          = map(pot(IDX_SLIDE_1), 0,1024,127,-1);
+    pots.pitchProb[1]          = map(pot(IDX_SLIDE_2), 0,1024,127,-1);
+    pots.pitchProb[2]          = map(pot(IDX_SLIDE_3), 0,1024,127,-1);
+    pots.pitchProb[3]          = map(pot(IDX_SLIDE_4), 0,1024,127,-1);
+    pots.pitchProb[4]          = map(pot(IDX_SLIDE_5), 0,1024,127,-1);
+    pots.pitchProb[5]          = map(pot(IDX_SLIDE_6), 0,1024,127,-1);
+    pots.pitchProb[6]          = map(pot(IDX_SLIDE_7), 0,1024,127,-1);
+    pots.pitchProb[7]          = map(pot(IDX_SLIDE_8), 0,1024,127,-1);
 
-    for (int i=0;i<8;i++)
-        pots.octaveProb[i] = pot(InIdx(IDX_OCT_1+i)); 
+    pots.octaveProb[0]         = map(pot(IDX_OCT_1),   0,1024, 0, 128);
+    pots.octaveProb[1]         = map(pot(IDX_OCT_2),   0,1024, 0, 128);
+    pots.octaveProb[2]         = map(pot(IDX_OCT_3),   0,1024, 0, 128);
+    pots.octaveProb[3]         = map(pot(IDX_OCT_4),   0,1024, 0, 128);
+    pots.octaveProb[4]         = map(pot(IDX_OCT_5),   0,1024, 0, 128);
+    pots.octaveProb[5]         = map(pot(IDX_OCT_6),   0,1024, 0, 128);
+    pots.octaveProb[6]         = map(pot(IDX_OCT_7),   0,1024, 0, 128);
+    pots.octaveProb[7]         = map(pot(IDX_OCT_8),   0,1024, 0, 128);
 
-    pots.density               = map(pot(IDX_DENSITY_POT), 0,1024, 0,128);
+    pots.density               = map(pot(IDX_DENSITY_POT), 0,1024, 0, 128);
 
     pots.deltaProb[0]          = map(pot(IDX_DELTA_PITCH), 0,1024, 127,-1);
     pots.deltaProb[1]          = map(pot(IDX_DELTA_VEL  ), 0,1024, 127,-1);
@@ -172,7 +184,9 @@ void hw::scanInputs()
     mapTgl(btnExtMidi  , IDX_BTN_EXTMIDI_TOG);
 
     mapBtn(btnInstant  , IDX_BTN_INST       );
+
     mapBtn(btnCopy     , IDX_BTN_NONDEST    );
+
     mapBtn(btnCycleL   , IDX_BTN_CYC_L      );
     mapBtn(btnCycleR   , IDX_BTN_CYC_R      );
     mapBtn(btnReset    , IDX_BTN_RESET      );

@@ -59,11 +59,11 @@ namespace {
     static int8_t octaveDisplacement(uint8_t degree)
     {
         uint16_t v = hw::pots.octaveProb[degree];   // raw pot
-        if (v < 512){
-            uint16_t chance = map(v, 0,511, 127,0);         // 0 ➜ 100 %,  511 ➜ 0 %
+        if (v < 62){
+            uint16_t chance = map(v, 0,63, 127,0);         // 0 ➜ 100 %,  62 ➜ 0 %
             return (random(128) < chance) ? -1 : 0;
-        }else if (v > 512){
-            uint16_t chance = map(v, 513,1023, 0,127);      // 513 ➜ 0 %,  1023 ➜ 100 %
+        }else if (v > 64){
+            uint16_t chance = map(v, 64,127, 0,127);      // 64 ➜ 0 %,  127 ➜ 100 %
             return (random(128) < chance) ? +1 : 0;
         }
         return 0;   // mid detent
@@ -106,6 +106,75 @@ void seq::init(){
     }
 }
 
+/* ===========================================================
+   ❶  Regenerate ALL 16 prospective steps once
+   =========================================================== */
+void seq::regenerateAll(uint8_t probability /*0-127*/)
+{
+    for (uint8_t s = 0; s < kSteps; ++s)
+        for (uint8_t a = 0; a < (uint8_t)Aspect::Count; ++a)
+            if (random(128) < probability)
+                track(Aspect(a)).prospectiveSequence[s] = generate(Aspect(a));
+}
+
+/* ===========================================================
+   ❷  Promote prospect → regular immediately
+   =========================================================== */
+void seq::commitProspect()
+{
+    for (uint8_t s = 0; s < kSteps; ++s) {
+        trPitch.regularSequence[s] = trPitch.prospectiveSequence[s];
+        trVel  .regularSequence[s] = trVel  .prospectiveSequence[s];
+        trOct  .regularSequence[s] = trOct  .prospectiveSequence[s];
+        trAcc  .regularSequence[s] = trAcc  .prospectiveSequence[s];
+    }
+}
+
+/* ===============================================================
+   rotation helpers – work on BOTH regular + prospect arrays
+   =============================================================== */
+static void rotateLeft (Track& T)
+{
+    uint8_t first = T.regularSequence[0];
+    for (uint8_t i = 0; i < kSteps-1; ++i)
+        T.regularSequence[i] = T.regularSequence[i+1];
+    T.regularSequence[kSteps-1] = first;
+
+    first = T.prospectiveSequence[0];
+    for (uint8_t i = 0; i < kSteps-1; ++i)
+        T.prospectiveSequence[i] = T.prospectiveSequence[i+1];
+    T.prospectiveSequence[kSteps-1] = first;
+}
+
+static void rotateRight(Track& T)
+{
+    uint8_t last = T.regularSequence[kSteps-1];
+    for (int8_t i = kSteps-1; i > 0; --i)
+        T.regularSequence[i] = T.regularSequence[i-1];
+    T.regularSequence[0] = last;
+
+    last = T.prospectiveSequence[kSteps-1];
+    for (int8_t i = kSteps-1; i > 0; --i)
+        T.prospectiveSequence[i] = T.prospectiveSequence[i-1];
+    T.prospectiveSequence[0] = last;
+}
+
+/* public wrappers ------------------------------------------------ */
+void seq::rotateAllLeft ()
+{
+    rotateLeft (trPitch); rotateLeft (trVel);
+    rotateLeft (trOct  ); rotateLeft (trAcc);
+}
+
+void seq::rotateAllRight()
+{
+    rotateRight(trPitch); rotateRight(trVel);
+    rotateRight(trOct  ); rotateRight(trAcc);
+}
+
+static bool resetPending = false;
+void  seq::armReset() { resetPending = true; }
+
 /* ---------- nextStep() – main logic ---------- */
 void seq::nextStep()
 {
@@ -113,10 +182,16 @@ void seq::nextStep()
     
     using namespace hw;
 
-    /* 1. advance step counter */
+    /* 0. honour pending reset ------------------------------------ */
+    if (resetPending) {
+        curStep      = hw::pots.loopStart ? hw::pots.loopStart - 1 : 0;
+        resetPending = false;           // one-shot
+    } else {
+    /* 1. advance step counter normally ----------------------- */
     curStep = advanceWithin(curStep,
-                        hw::pots.loopStart - 1,
-                        hw::pots.loopEnd   - 1);
+                            hw::pots.loopStart - 1,
+                            hw::pots.loopEnd   - 1);
+}
 
     /* 2. loop over four aspects */
     for(uint8_t a=0; a < (uint8_t)Aspect::Count; ++a)
@@ -134,7 +209,7 @@ void seq::nextStep()
         /* ─ Instantaneous (highest priority) ─ */
         if (btnInstant.edge && random(128) < pots.instChance){
             uint8_t v = generate(asp);
-            T.reg [curStep] = v;
+            T.regularSequence [curStep] = v;
             T.prospectiveSequence[curStep] = v;
             continue;
         }
@@ -148,7 +223,7 @@ void seq::nextStep()
                 for (uint8_t i=0;i<16;i++){ Serial.print(trVel.regularSequence[i]); Serial.print(' '); }
                 Serial.println(']');*/
             
-            T.reg [curStep] = v;
+            T.regularSequence [curStep] = v;
             T.prospectiveSequence[curStep] = v;
             continue;
         }
@@ -161,26 +236,6 @@ void seq::nextStep()
 
         /* ─ default: copy regular → prospect ─ */
         T.prospectiveSequence[curStep] = T.regularSequence[curStep];
-    }
-
-    /* 3. Commit prospect → regular if Copy button edged */
-    /* 3-A  Instantaneous button  – regenerate *all* 16 prospect steps once */
-    if (hw::btnInstant.edge){
-        for(uint8_t s=0;s<kSteps;s++){
-            for(uint8_t a=0;a<(uint8_t)Aspect::Count;a++){
-                track(Aspect(a)).prospectiveSequence[s] = generate(Aspect(a));
-            }
-        }
-    }
-
-    /* 3-B  Copy button  – commit prospect → regular */
-    if (hw::btnCopy.edge){
-        for(uint8_t s=0;s<kSteps;s++){
-            trPitch.regularSequence[s]=trPitch.prospectiveSequence[s];
-            trVel  .regularSequence[s]=trVel  .prospectiveSequence[s];
-            trOct  .regularSequence[s]=trOct  .prospectiveSequence[s];
-            trAcc  .regularSequence[s]=trAcc  .prospectiveSequence[s];
-        }
     }
 
 
@@ -206,7 +261,7 @@ void seq::nextStep()
 
     //Set velocity/accent
     uint8_t baseVel = trVel.prospectiveSequence[curStep] ? pots.velocity : 0;
-    if (trAcc.prospectiveSequence[curStep] && baseVel > 0) {
+    if (trAcc.prospectiveSequence[curStep]) {
          baseVel = pots.accentVel;   // accent hit
     }
     uint8_t midiVel = constrain(baseVel, 0, 127);
