@@ -1,6 +1,6 @@
 #include "sequencer.h"
 #include "clock_engine.h"
-
+#include "ui.h"
 #include <MIDI.h>
 
 /*  exact extern using the namespace chosen by the library  */
@@ -269,6 +269,10 @@ void seq::nextStep()
 
 
     MIDI.sendNoteOn(midiPitch, midiVel, 1);      // new note
+    ui::refresh();          // draw into the pixel buffer
+    strip.show();           // commit: interrupts off for 0.4 ms
+
+    hw::btnInstant.edge = false;    // prevents multiple hits per press
 
     //TESTING
     //Serial.print(F("STEP ")); Serial.println(curStep);

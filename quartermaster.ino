@@ -4,6 +4,8 @@
 #include "sequencer.h"
 #include "ui.h"
 
+MIDI_CREATE_DEFAULT_INSTANCE();
+
 void setup(){
     Serial.begin(31250);
     hw::initPins();
@@ -18,6 +20,7 @@ void setup(){
 void loop()
 {
     hw::scanInputs();
+    MIDI.read();
 
     if (hw::btnInstant.edge) {                         //   BTN_INST
         seq::regenerateAll(hw::pots.instChance);       //   make 16 new prospect notes
@@ -108,12 +111,12 @@ void dbgPrint()
     if (!changed) return;
 
     /* -------- pretty print -------- */
-    Serial.print(F("Start="));  Serial.print(prevStart);
+    /*Serial.print(F("Start="));  Serial.print(prevStart);
     Serial.print(F(" End="));   Serial.print(prevEnd);
     Serial.print(F(" PProb1="));Serial.print(prevPP);
     Serial.print(F(" Destruct="));Serial.print(hw::btnDestruct.level);
     if (pendingEdge) Serial.print(F("  [EDGE]"));
-    Serial.println();
+    Serial.println();*/
 
     pendingEdge = false;   // clear after showing*/
 }

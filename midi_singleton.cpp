@@ -1,2 +1,2 @@
-#include <MIDI.h>
-MIDI_CREATE_DEFAULT_INSTANCE();          // the ONE definition
+//#include <MIDI.h>
+//MIDI_CREATE_DEFAULT_INSTANCE();          // the ONE definition

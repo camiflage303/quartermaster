@@ -1,5 +1,8 @@
 #pragma once
 #include <Arduino.h>
+#include <Adafruit_NeoPixel.h>
+
+extern Adafruit_NeoPixel strip;
 
 namespace ui {
 

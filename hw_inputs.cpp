@@ -103,23 +103,38 @@ void hw::initPins(){
 /* ───────────── 8. scanInputs()  ───────────────────────────────────── */
 void hw::scanInputs()
 {
-    /* 8-A  read every control into inputs[] ------------------------- */
-    for(int i=0;i<N_RAW_INPUTS;++i){
+    /* 0. decide which slice of the big table we will touch this round */
+    static uint8_t bank = 0;               // 0 → first ⅓, 1 → second ⅓, 2 → last ⅓
+    constexpr uint8_t BANKS      = 3;
+    constexpr uint16_t BANK_SIZE = (N_RAW_INPUTS + BANKS - 1) / BANKS;   // ceil
+    uint16_t start = bank * BANK_SIZE;
+    uint16_t end = (start + BANK_SIZE < N_RAW_INPUTS)
+             ? start + BANK_SIZE
+             : N_RAW_INPUTS;
+
+    /* 1. read ONLY that slice (analogRead + button debounce) */
+    for (uint16_t i = start; i < end; ++i) {
         int v = readMux(inputs[i].mux, inputs[i].ch);
 
-        if(inputs[i].isButton){
+        if (inputs[i].isButton) {
             bool pressed = (v > 512);
-            // edge detect for LED toggle buttons
-            if(pressed && inputs[i].lastVal==0){
+            if (pressed && inputs[i].lastVal == 0) {           // rising edge
                 inputs[i].led = !inputs[i].led;
-                if(inputs[i].ledIdx >= 0)             //    only drive HW if it exists
-                   digitalWrite(LED_PINS[inputs[i].ledIdx], inputs[i].led);
+                if (inputs[i].ledIdx >= 0)
+                    digitalWrite(LED_PINS[inputs[i].ledIdx], inputs[i].led);
             }
             inputs[i].lastVal = pressed;
-        }else{
-            if(abs(v - inputs[i].lastVal) > 10) inputs[i].lastVal = v;
+        } else {
+            if (abs(v - inputs[i].lastVal) > 10)
+                inputs[i].lastVal = v;
         }
     }
+
+    /* 2. advance bank pointer for next loop() pass */
+    bank = (bank + 1) % BANKS;
+
+    /* 3. *Only after we have read ALL 3 slices* do we rebuild Pots & Buttons. */
+    if (bank != 0) return;                // not finished yet → skip the mapping step
 
     /* 8-B  map raw pots to 0-100/127/…, fill PotValues -------------- */
     auto pot = [&](InIdx idx){ return inputs[idx].lastVal; };
@@ -155,7 +170,7 @@ void hw::scanInputs()
     pots.accentChance          = map(pot(IDX_ACC_PROB_POT ), 0,1024, 0,128);
 
     pots.bpm                   = map(pot(IDX_TEMPO_POT   ), 0,1023, 3,303);
-    uint8_t ix = map(pot(IDX_TEMPO_POT), 0,1023, 0,8);   // 0-8
+    uint8_t ix = map(pot(IDX_TEMPO_POT), 0,1024, 0,9);   // 0-8
     pots.pulsesPerStep = kPpsLookup[ix];
 
     pots.loopStart             = map(pot(IDX_LOOP_START  ), 0,1024, 1, 17);

@@ -2,6 +2,7 @@
 #include "sequencer.h"
 #include "hw_inputs.h"
 #include <Adafruit_NeoPixel.h>
+#include "clock_engine.h"
 
 /* ───────── NeoPixel hardware ───────── */
 constexpr uint8_t LED_PIN   = 6;      // same as your old build
@@ -14,9 +15,15 @@ static uint8_t  prevLoopMin   = 0;
 static uint8_t  prevLoopMax   = 0;
 static uint8_t  prevVel[NUM_LEDS] = {0};
 
+static bool ledsDirty = false;           // set → something changed this frame
+
 /* quick helpers */
 inline void px(uint8_t i,uint8_t r,uint8_t g,uint8_t b){
-    strip.setPixelColor(i,strip.Color(r,g,b));
+    uint32_t newClr = strip.Color(r,g,b);
+    if (strip.getPixelColor(i) != newClr) {   // only if color actually changes
+        strip.setPixelColor(i,newClr);
+        ledsDirty = true;                     // request a strip.show()
+    }
 }
 
 /* colour palette (tweak to taste) */
@@ -65,6 +72,7 @@ static void paintStaticRegion()
 
 void ui::refresh()
 {
+    //if (clock::usingExt) return;      // ❶ DON’T touch LEDs while external sync is active
     /* flash on edges ------------------------------------------------ */
 //if(hw::btnCycleL.edge) flashLed(3, {0,60,0});       // green
 //if(hw::btnCycleR.edge) flashLed(5, {0,60,0});
@@ -113,6 +121,20 @@ void ui::refresh()
         prevStep = step;
     }
 
-    strip.show();
+    /* ---------- commit to strip ---------- */
+    if (ledsDirty) {
+
+        if (!clock::usingExt) {
+            /* internal-clock mode – safe to block right now */
+            strip.show();
+            ledsDirty = false;
+        }
+        else {
+            /* external sync: defer the blocking call until the exact
+               instant a new step has *already* arrived → we piggy-back
+               on the gap we know is safe (Option 1 throttle).           */
+        }
+        ledsDirty = false;
+    }
 }
 
