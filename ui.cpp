@@ -7,7 +7,7 @@
 /* ───────── NeoPixel hardware ───────── */
 constexpr uint8_t LED_PIN   = 6;      // same as your old build
 constexpr uint8_t NUM_LEDS  = 16;
-static Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 /* ───────── cached previous state ───── */
 static uint8_t  prevStep      = 255;      // invalid → forces first paint
@@ -96,6 +96,10 @@ void ui::refresh()
     if (needFull) {
         paintStaticRegion();
         prevStep = 255;                  /* force head redraw too      */
+        ledsDirty = true;
+
+        strip.show();                 // one 0.4 ms block – happens rarely
+        ledsDirty = false;            // buffer is now clean
     }
 
     /* 2. head / play-cursor ───────────────────────────────── */
@@ -134,7 +138,6 @@ void ui::refresh()
                instant a new step has *already* arrived → we piggy-back
                on the gap we know is safe (Option 1 throttle).           */
         }
-        ledsDirty = false;
     }
 }
 

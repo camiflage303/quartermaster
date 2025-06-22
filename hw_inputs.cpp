@@ -199,6 +199,15 @@ void hw::scanInputs()
     mapTgl(btnExtMidi  , IDX_BTN_EXTMIDI_TOG);
 
     mapBtn(btnInstant  , IDX_BTN_INST       );
+    /*if (btnInstant.edge) {
+        static unsigned long lastEdgeMs = 0;
+        unsigned long now = millis();
+        if (now - lastEdgeMs < 30) {      // 30-ms window → kill bounce
+            btnInstant.edge = false;      // ignore this spurious edge
+        } else {
+            lastEdgeMs = now;             // accept, remember time
+        }
+    }*/
 
     mapBtn(btnCopy     , IDX_BTN_NONDEST    );
 

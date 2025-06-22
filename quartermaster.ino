@@ -25,6 +25,9 @@ void loop()
     if (hw::btnInstant.edge) {                         //   BTN_INST
         seq::regenerateAll(hw::pots.instChance);       //   make 16 new prospect notes
         seq::commitProspect();                         //   and commit at once
+        ui::refresh();   // redraw pixels to show the new pattern
+        strip.show();    // commit once (still < 0.5 ms)
+        hw::btnInstant.edge = false;
     }
 
     if (hw::btnCopy.edge) {                            //   BTN_NONDEST
@@ -36,11 +39,13 @@ void loop()
    ---------------------------------------------- */
     if (hw::btnCycleL.edge) {
         seq::rotateAllLeft();
+        hw::btnCycleL.edge = false;
         //flashLed(3, {0,60,0});            // same green wink
     }
 
     if (hw::btnCycleR.edge) {
         seq::rotateAllRight();
+        hw::btnCycleR.edge = false;
         //flashLed(5, {0,60,0});
     }
 
@@ -60,6 +65,7 @@ void loop()
 
     /* ---------- falling edge  (ON → OFF) -------------------- */
     if (!on &&  prevOn ) {
+        MIDI.sendControlChange(123, 0, 1);    // all notes off
         uint8_t target = hw::pots.loopEnd ? hw::pots.loopEnd - 1 : 15;
         seq::forceStep(target);            // park at last step
     }

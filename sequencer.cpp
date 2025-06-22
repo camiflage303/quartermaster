@@ -1,3 +1,4 @@
+#include "hw_inputs.h"
 #include "sequencer.h"
 #include "clock_engine.h"
 #include "ui.h"
@@ -111,10 +112,18 @@ void seq::init(){
    =========================================================== */
 void seq::regenerateAll(uint8_t probability /*0-127*/)
 {
+    using namespace hw;
+
     for (uint8_t s = 0; s < kSteps; ++s)
         for (uint8_t a = 0; a < (uint8_t)Aspect::Count; ++a)
-            if (random(128) < probability)
+        {
+            /* Skip this aspect if the Δ-Lock slider says “freeze”.   */
+            if (random(128) < pots.deltaProb[a])
+                continue;
+
+            if (random(128) < probability)          // instChance pot
                 track(Aspect(a)).prospectiveSequence[s] = generate(Aspect(a));
+        }
 }
 
 /* ===========================================================
@@ -203,6 +212,7 @@ void seq::nextStep()
         bool delta = (random(128) < pots.deltaProb[a]);
         if (delta){
             T.prospectiveSequence[curStep] = T.regularSequence[curStep];
+            hw::btnInstant.edge = false;
             continue;
         }
 
@@ -211,6 +221,8 @@ void seq::nextStep()
             uint8_t v = generate(asp);
             T.regularSequence [curStep] = v;
             T.prospectiveSequence[curStep] = v;
+
+            hw::btnInstant.edge = false;
             continue;
         }
 

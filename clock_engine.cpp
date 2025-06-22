@@ -15,7 +15,7 @@ using namespace MIDI_NAMESPACE;
 
 /* ───────── constants ─────────────────────────────────────────────────── */
 constexpr uint8_t PPQN      = 24;   // MIDI clocks per quarter-note
-constexpr uint8_t STEP_DIV  = 6;    // 24 / 4  →  one 16-th note
+volatile uint8_t  pulsesPerStepISR = 6;   // was STEP_DIV const
 
 /* ───────── state shared with ISRs  ───────────────────────────────────── */
 namespace {
@@ -43,11 +43,13 @@ static inline void raiseStepFlag()
 }
 
 /* ───────── MIDI ISR callbacks ───────────────────────────────────────── */
-static void isrClock()    // 0xF8
+static void isrClock()
 {
     if (!clock::usingExt || !transportRun) return;
 
-    if (++extTickCtr >= STEP_DIV) raiseStepFlag();
+    if (++extTickCtr >= pulsesPerStepISR) {
+        raiseStepFlag();
+    }
 }
 
 static void isrStart()    // 0xFA
@@ -56,7 +58,11 @@ static void isrStart()    // 0xFA
     raiseStepFlag();      // beat-1 right away
 }
 static void isrContinue() { transportRun = true; }
-static void isrStop()     { transportRun = false; extStepFlag = false; }
+static void isrStop()     { 
+    transportRun = false; 
+    extStepFlag = false; 
+    MIDI.sendControlChange(123, 0, 1);
+}
 
 /* ───────── init ─────────────────────────────────────────────────────── */
 void clock::init()
@@ -95,11 +101,25 @@ void clock::service()
     bool on  = hw::btnOnOff.level;
     bpm      = hw::pots.bpm;
 
+    /* -------- update pulses-per-step (pot) ------------- */
+    uint8_t uiPPS = constrain(hw::pots.pulsesPerStep, 1, 24);  // you choose range
+    static uint8_t prevPPS = 6;
+
+    if (uiPPS != prevPPS) {                // pot moved → copy to ISR
+        noInterrupts();
+        pulsesPerStepISR = uiPPS;          // single 8-bit store (atomic)
+        extTickCtr  = 0;                   // avoid half-step after change
+        intTickCtr  = 0;
+        interrupts();
+        prevPPS = uiPPS;
+    }
+
     /* If the user flipped Ext-Sync, flush the external counters so
        we never reuse stale ticks when we switch modes. */
     static bool prevUsingExt = usingExt;
     if (usingExt != prevUsingExt) {
         hardResetCounters();
+        lastIntUs = micros();
         prevUsingExt = usingExt;
     }
 
@@ -137,7 +157,7 @@ void clock::service()
         lastIntUs += usPerTick;           // maintain phase
         MIDI.sendRealTime(midi::Clock);   // keep downstream gear happy
 
-        if (++intTickCtr >= STEP_DIV) {
+        if (++intTickCtr >= pulsesPerStepISR) {
             intTickCtr = 0;
             seq::nextStep();
         }
