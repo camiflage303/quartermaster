@@ -76,15 +76,21 @@ namespace {
         switch(a){
             case seq::Aspect::Pitch:
                 return weightedRandomSelection(8, pots.pitchProb);   // helper below
+            /* ---- Velocity (gate on/off) --------- */
             case seq::Aspect::Vel:
-                return (random(128) < hw::pots.density);   // 0/1
+                return random(128) < hw::pots.density;     // 1 = gate present
+
+            /* ---- Octave displacement ------------ */
             case seq::Aspect::Oct: {
-                /* return -1 / 0 / +1 weighted by that degree’s pot */
-                uint8_t deg = trPitch.prospectiveSequence[curStep] & 0x07;   // use the *prospective* degree
-                return octaveDisplacement(deg) + 1;           // store as 0,1,2  (-1,0,+1)
+                uint8_t deg = trPitch.prospectiveSequence[curStep] & 0x07;
+                return octaveDisplacement(deg) + 1;        // store 0,1,2
             }
-            default: /* Accent */ 
-                return random(128) < pots.accentChance;
+
+            /* ---- V1 / V2 selector --------------- */
+            case seq::Aspect::Acc:
+                if (!trVel.prospectiveSequence[curStep])   // no gate? → stay Velocity-1
+                    return 0;
+                return random(128) < hw::pots.accentChance;  // 1 = Velocity-2
         }
     }
 
@@ -272,10 +278,14 @@ void seq::nextStep()
 
 
     //Set velocity/accent
-    uint8_t baseVel = trVel.prospectiveSequence[curStep] ? pots.velocity : 0;
-    if (trAcc.prospectiveSequence[curStep]) {
-         baseVel = pots.accentVel;   // accent hit
+    /* gate present? */
+    uint8_t baseVel = 0;
+    if (trVel.prospectiveSequence[curStep]) {           // Velocity-1 hit
+        baseVel = hw::pots.velocity;                    // Velocity pot
+        if (trAcc.prospectiveSequence[curStep])         // flipped to Velocity-2?
+            baseVel = hw::pots.accentVel;               // Acc_amt pot
     }
+    /* baseVel == 0 ⇒ rest (no NoteOn will be audible) */
     uint8_t midiVel = constrain(baseVel, 0, 127);
 
 
