@@ -43,6 +43,59 @@ namespace {
 
     uint8_t curStep = 0;
 
+    /* ─────────────  SH-101 style pitch pool  ───────────── */
+    static uint8_t  pitchPool[16];   // remembered degrees (0-7)
+    static uint8_t  poolSize  = 0;   // valid entries
+    static uint8_t  poolIndex = 0;   // next element to read
+    static bool     tookFromPool = false;  // set per step
+
+    /* Build pool from current REGULAR pattern: gated notes inside loop */
+    static void rebuildPitchPool()
+    {
+        poolSize  = 0;
+        poolIndex = 0;
+
+        uint8_t lo = hw::pots.loopStart ? hw::pots.loopStart - 1 : 0;
+        uint8_t hi = hw::pots.loopEnd   ? hw::pots.loopEnd   - 1 : 15;
+        bool wrap  = lo > hi;
+
+        for (uint8_t i = 0; i < kSteps; ++i) {
+            bool inLoop = wrap ? (i >= lo || i <= hi)
+                               : (i >= lo && i <= hi);
+            if (inLoop && trVel.regularSequence[i]) {
+                pitchPool[poolSize++] = trPitch.regularSequence[i] & 0x07;
+                if (poolSize == 16) break;                // safety cap
+            }
+        }
+
+        if (poolSize == 0) { pitchPool[0] = 0; poolSize = 1; }
+        poolIndex %= poolSize;
+    }
+
+    /* insert / replace at stepIdx then rebuild, leaving poolIndex on next note */
+    static inline void rememberPitch(uint8_t stepIdx, uint8_t degree)
+    {
+        trPitch.regularSequence[stepIdx] = degree;
+        rebuildPitchPool();                               // keeps order unique-dup
+        /* start cycling from the element AFTER this step’s pitch          */
+        poolIndex = (poolIndex + 1) % poolSize;
+    }
+
+    /* Count gated steps inside the current loop – used for gradual shrink */
+    static uint8_t gatedCountInLoop()
+    {
+        uint8_t lo = hw::pots.loopStart ? hw::pots.loopStart - 1 : 0;
+        uint8_t hi = hw::pots.loopEnd   ? hw::pots.loopEnd   - 1 : 15;
+        bool wrap  = lo > hi;
+        uint8_t cnt=0;
+        for (uint8_t i=0;i<kSteps;i++){
+            bool inLoop = wrap ? (i>=lo || i<=hi) : (i>=lo && i<=hi);
+            if (inLoop && trVel.prospectiveSequence[i]) ++cnt;
+        }
+        return cnt ? cnt : 1;            // never 0
+    }
+
+
     inline Track& track(seq::Aspect a){
         switch(a){
             case seq::Aspect::Pitch: return trPitch;
@@ -74,8 +127,32 @@ namespace {
     {
         using namespace hw;
         switch(a){
-            case seq::Aspect::Pitch:
-                return weightedRandomSelection(8, pots.pitchProb);   // helper below
+            /* ---------- Pitch with probabilistic pool ---------- */
+            case seq::Aspect::Pitch: {
+                uint8_t prob = hw::pots.deltaProb[0];   // 0-127 (lock)
+
+                if (!poolSize) rebuildPitchPool();      // first run / after reset
+
+                bool usePool = (prob == 127) || (random(128) < prob); //read-prob
+                tookFromPool = false;                  // reset flag
+
+                if (usePool && poolSize) {
+                    uint8_t deg = pitchPool[poolIndex];
+                    /* do NOT advance pointer yet – we’ll do it after we know
+                       whether this step actually fires a gate               */
+                    tookFromPool = true;
+                    return deg;
+                }
+
+                /* Generate new degree */
+                uint8_t deg = weightedRandomSelection(8, pots.pitchProb);
+
+                /* Fade-in lock: remember with chance  (127-prob)/127 */
+                if (prob < 127 && random(128) < (127 - prob))
+                    rememberPitch(curStep, deg);
+
+                return deg;
+            }
             /* ---- Velocity (gate on/off) --------- */
             case seq::Aspect::Vel:
                 return random(128) < hw::pots.density;     // 1 = gate present
@@ -111,6 +188,7 @@ void seq::init(){
     for(uint8_t i=0;i<kSteps;i++){
         trPitch.regularSequence[i]=0; trVel.regularSequence[i]=1;
     }
+    poolSize = 0; poolIndex = 0; tookFromPool = false;
 }
 
 /* ===========================================================
@@ -123,8 +201,9 @@ void seq::regenerateAll(uint8_t probability /*0-127*/)
     for (uint8_t s = 0; s < kSteps; ++s)
         for (uint8_t a = 0; a < (uint8_t)Aspect::Count; ++a)
         {
-            /* Skip this aspect if the Δ-Lock slider says “freeze”.   */
-            if (random(128) < pots.deltaProb[a])
+            /* Freeze only non-pitch aspects */
+            if (Aspect(a) != Aspect::Pitch &&
+                random(128) < hw::pots.deltaProb[a])
                 continue;
 
             if (random(128) < probability)          // instChance pot
@@ -215,7 +294,8 @@ void seq::nextStep()
         Track& T   = track(asp);
 
         /* ─ Δ-lock ─ */
-        bool delta = (random(128) < pots.deltaProb[a]);
+        bool delta = (asp != Aspect::Pitch) &&
+                     (random(128) < pots.deltaProb[a]);
         if (delta){
             T.prospectiveSequence[curStep] = T.regularSequence[curStep];
             hw::btnInstant.edge = false;
@@ -256,6 +336,27 @@ void seq::nextStep()
         T.prospectiveSequence[curStep] = T.regularSequence[curStep];
     }
 
+    /* ---------- maintain pitch-pool after all aspects are decided ---------- */
+    {
+        bool gate = trVel.prospectiveSequence[curStep];
+        uint8_t prob = hw::pots.deltaProb[0];
+
+        /* Advance pointer ONLY if we actually used the pool on a gated step */
+        if (gate && tookFromPool && poolSize) {
+            poolIndex = (poolIndex + 1) % poolSize;
+        }
+
+        /* -------- gradual shrink when loop bounds shrink ---------- */
+        uint8_t want = gatedCountInLoop();        // desired pool length
+        if (poolSize > want && prob < 127) {      // only shrink when unlocked
+            /* shrink chance mirrors write-prob  */
+            if (random(128) < (127 - prob)) {
+                /* remove from END to preserve order & wrap pointer */
+                --poolSize;
+                poolIndex %= poolSize;
+            }
+        }
+    }
 
     /* 4. Build and send MIDI note (simple demo) */
     static const uint8_t modes[7][8] = {
