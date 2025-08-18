@@ -30,8 +30,8 @@ void loop()
         hw::btnInstant.edge = false;
     }
 
-    if (hw::btnCopy.edge) {                            //   BTN_NONDEST
-        seq::commitProspect();                         //   promote last 16 temp steps
+    if (hw::btnCopy.edge) {                            //   BTN_COMMIT (global)
+        seq::commitProspect();                         //   write the 16-step prospective layer to regular
     }
 
     /* ----------------------------------------------

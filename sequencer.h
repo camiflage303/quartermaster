@@ -4,7 +4,8 @@
 
 namespace seq {
 
-    enum class Aspect : uint8_t { Pitch, Vel, Oct, Acc, Count }; //Dbl
+    // Renamed Acc -> VSel (Velocity selector: 0 = V1, 1 = V2)
+    enum class Aspect : uint8_t { Pitch, Vel, Oct, VSel, Count };
 
     void init();
     void nextStep();

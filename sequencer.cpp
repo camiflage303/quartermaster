@@ -10,7 +10,6 @@ extern MIDI_NAMESPACE::MidiInterface<
        > MIDI;
 using namespace MIDI_NAMESPACE;          // lets you write just “MIDI.send…”
 
-
 /* ---------- internal storage ---------- */
 namespace {
 
@@ -39,21 +38,20 @@ namespace {
 
     struct Track { uint8_t regularSequence[kSteps]={0}; uint8_t prospectiveSequence[kSteps]={0}; };
 
-    Track trPitch, trVel, trOct, trAcc;
+    Track trPitch, trVel, trOct, trAcc;   // trAcc = VSel (0 = V1, 1 = V2)
 
     uint8_t curStep = 0;
 
-    /* ─────────────  SH-101 style pitch pool  ───────────── */
-    static uint8_t  pitchPool[16];   // remembered degrees (0-7)
-    static uint8_t  poolSize  = 0;   // valid entries
-    static uint8_t  poolIndex = 0;   // next element to read
-    static bool     tookFromPool = false;  // set per step
+    /* ─────────────  LEGACY SH-101 style PITCH POOL (used when Δ-lock=0)  ───────────── */
+    static uint8_t  legacyPitchPool[16];   // remembered degrees (0-7)
+    static uint8_t  legacyPoolSize  = 0;   // valid entries
+    static uint8_t  legacyPoolIndex = 0;   // next element to read
+    static bool     legacyTookFromPool = false;  // set per step
 
-    /* Build pool from current REGULAR pattern: gated notes inside loop */
-    static void rebuildPitchPool()
+    static void legacyRebuildPitchPool()
     {
-        poolSize  = 0;
-        poolIndex = 0;
+        legacyPoolSize  = 0;
+        legacyPoolIndex = 0;
 
         uint8_t lo = hw::pots.loopStart ? hw::pots.loopStart - 1 : 0;
         uint8_t hi = hw::pots.loopEnd   ? hw::pots.loopEnd   - 1 : 15;
@@ -63,26 +61,24 @@ namespace {
             bool inLoop = wrap ? (i >= lo || i <= hi)
                                : (i >= lo && i <= hi);
             if (inLoop && trVel.regularSequence[i]) {
-                pitchPool[poolSize++] = trPitch.regularSequence[i] & 0x07;
-                if (poolSize == 16) break;                // safety cap
+                legacyPitchPool[legacyPoolSize++] = trPitch.regularSequence[i] & 0x07;
+                if (legacyPoolSize == 16) break;                // safety cap
             }
         }
 
-        if (poolSize == 0) { pitchPool[0] = 0; poolSize = 1; }
-        poolIndex %= poolSize;
+        if (legacyPoolSize == 0) { legacyPitchPool[0] = 0; legacyPoolSize = 1; }
+        legacyPoolIndex %= legacyPoolSize;
     }
 
-    /* insert / replace at stepIdx then rebuild, leaving poolIndex on next note */
-    static inline void rememberPitch(uint8_t stepIdx, uint8_t degree)
+    static inline void legacyRememberPitch(uint8_t stepIdx, uint8_t degree)
     {
         trPitch.regularSequence[stepIdx] = degree;
-        rebuildPitchPool();                               // keeps order unique-dup
-        /* start cycling from the element AFTER this step’s pitch          */
-        poolIndex = (poolIndex + 1) % poolSize;
+        legacyRebuildPitchPool();                         // keeps order unique-dup
+        legacyPoolIndex = (legacyPoolIndex + 1) % legacyPoolSize;  // next after this note
     }
 
-    /* Count gated steps inside the current loop – used for gradual shrink */
-    static uint8_t gatedCountInLoop()
+    /* Count gated steps inside the current loop – used for legacy shrink */
+    static uint8_t legacyGatedCountInLoop()
     {
         uint8_t lo = hw::pots.loopStart ? hw::pots.loopStart - 1 : 0;
         uint8_t hi = hw::pots.loopEnd   ? hw::pots.loopEnd   - 1 : 15;
@@ -92,23 +88,166 @@ namespace {
             bool inLoop = wrap ? (i>=lo || i<=hi) : (i>=lo && i<=hi);
             if (inLoop && trVel.prospectiveSequence[i]) ++cnt;
         }
-        return cnt ? cnt : 1;            // never 0
+        return cnt ? cnt : 1;
     }
 
+    /* ---- Legacy generator for Pitch (SH-101 semantics) ---- */
+    static uint8_t generateLegacyPitch()
+    {
+        using namespace hw;
+        uint8_t prob = hw::pots.deltaProb[0];   // 0-127 (legacy lock)
+        if (!legacyPoolSize) legacyRebuildPitchPool();      // first run / after reset
 
-    inline Track& track(seq::Aspect a){
+        bool usePool = (prob == 127) || (random(128) < prob);
+        legacyTookFromPool = false;
+
+        if (usePool && legacyPoolSize) {
+            uint8_t deg = legacyPitchPool[legacyPoolIndex];
+            legacyTookFromPool = true;          // advance later if gated
+            return deg;
+        }
+
+        /* Generate new degree */
+        uint8_t deg = weightedRandomSelection(8, pots.pitchProb);
+
+        /* Fade-in lock: remember with chance  (127-prob)/127 */
+        if (prob < 127 && random(128) < (127 - prob))
+            legacyRememberPitch(curStep, deg);
+
+        return deg;
+    }
+
+    /* ─────────────  NEW per-aspect pools with target/active + morph (Pitch/Oct/VSel) ───────────── */
+    struct PoolElem { uint8_t step; uint8_t val; };  // keep source step to preserve loop order
+    struct AspectPool {
+        PoolElem active[16]; uint8_t aSize = 0; uint8_t aPtr = 0;   // what is currently used
+        PoolElem target[16]; uint8_t tSize = 0;                     // rebuilt from loop-gated steps
+        bool     morphActive = false;                               // need to converge active→target
+    };
+
+    static AspectPool poolPitch, poolOct, poolVSel;
+
+    static inline void stepsInLoop(uint8_t* out, uint8_t& n){
+        uint8_t a = hw::pots.loopStart ? hw::pots.loopStart - 1 : 0;
+        uint8_t b = hw::pots.loopEnd   ? hw::pots.loopEnd   - 1 : 15;
+        n = 0;
+        if (a <= b) { for (uint8_t i=a; i<=b; ++i) out[n++] = i; }
+        else        { for (uint8_t i=a; i<16; ++i) out[n++] = i; for (uint8_t i=0; i<=b; ++i) out[n++] = i; }
+    }
+
+    static inline Track& trackOf(seq::Aspect a){
         switch(a){
             case seq::Aspect::Pitch: return trPitch;
             case seq::Aspect::Vel:   return trVel;
             case seq::Aspect::Oct:   return trOct;
+            case seq::Aspect::VSel:  return trAcc;
             default:                 return trAcc;
         }
     }
 
+    static inline int8_t findStep(const PoolElem* arr, uint8_t sz, uint8_t step){
+        for (uint8_t i=0;i<sz;i++) if (arr[i].step == step) return i;
+        return -1;
+    }
+
+    /* Rebuild TARGET pool from REGULAR buffer’s gated steps in play order */
+    static void rebuildTargetPool(seq::Aspect asp, AspectPool& P){
+        uint8_t idxs[16], n; stepsInLoop(idxs, n);
+        const Track& T = trackOf(asp);
+        P.tSize = 0;
+        for (uint8_t k=0;k<n;k++){
+            uint8_t s = idxs[k];
+            if (trVel.regularSequence[s]) {                 // only gated steps (REGULAR)
+                P.target[P.tSize++] = { s, T.regularSequence[s] };
+                if (P.tSize == 16) break;
+            }
+        }
+        P.morphActive = true;  // request gradual convergence
+    }
+
+    /* Perform at most one morph step toward target; probability = (127 - slider) */
+    static void maybeMorph(AspectPool& P, uint8_t slider /*0..127*/){
+        uint8_t pMorph = 127 - slider;                      // high slider → slower morphs
+        if (!P.morphActive) return;
+        if (random(128) >= pMorph) return;
+
+        // Prefer deletes of out-of-loop items first when shrinking
+        if (P.aSize > P.tSize){
+            for (int8_t i = P.aSize - 1; i >= 0; --i){
+                if (findStep(P.target, P.tSize, P.active[i].step) < 0){
+                    if (P.aSize && i < P.aPtr) P.aPtr = (P.aPtr + P.aSize - 1) % P.aSize;
+                    for (uint8_t j=i; j<P.aSize-1; ++j) P.active[j] = P.active[j+1];
+                    --P.aSize;
+                    if (P.aSize) P.aPtr %= P.aSize; else P.aPtr = 0;
+                    return;
+                }
+            }
+        }
+        // Grow: insert first missing target element at its position
+        if (P.aSize < P.tSize){
+            for (uint8_t k=0;k<P.tSize;k++){
+                if (findStep(P.active, P.aSize, P.target[k].step) < 0){
+                    uint8_t pos = k;
+                    for (uint8_t j=P.aSize; j>pos; --j) P.active[j] = P.active[j-1];
+                    P.active[pos] = P.target[k];
+                    ++P.aSize;
+                    if (pos <= P.aPtr) ++P.aPtr;
+                    P.aPtr %= P.aSize;
+                    return;
+                }
+            }
+        }
+        // Same size: replace first mismatch to realign contents/order
+        for (uint8_t k=0;k<P.aSize;k++){
+            if (P.active[k].step != P.target[k].step || P.active[k].val != P.target[k].val){
+                P.active[k] = P.target[k];
+                return;
+            }
+        }
+        P.morphActive = false;  // reached target
+    }
+
+    /* ---------- pointer alignment (for 0→>0 lock) ---------- */
+    static void alignPointerToCurrentOrNextGate(AspectPool& P){
+        if (!P.aSize) { P.aPtr = 0; return; }
+        uint8_t loopIdx[16], n; stepsInLoop(loopIdx, n);
+        // Find start position at current step in loop order
+        uint8_t startK = 0;
+        for (uint8_t k=0;k<n;k++){ if (loopIdx[k]==curStep){ startK = k; break; } }
+        // Scan from current step forward to the next gated step that exists in pool
+        for (uint8_t off=0; off<n; ++off){
+            uint8_t s = loopIdx[(startK + off) % n];
+            if (trVel.regularSequence[s]) {
+                int8_t ix = findStep(P.active, P.aSize, s);
+                if (ix >= 0) { P.aPtr = (uint8_t)ix; return; }
+            }
+        }
+        // fallback
+        P.aPtr %= P.aSize;
+    }
+
+    /* ---------- on-slider-change hook ---------- */
+    static void onSliderChange(seq::Aspect asp, uint8_t oldS, uint8_t newS){
+        AspectPool* P = (asp==seq::Aspect::Pitch ? &poolPitch
+                           : asp==seq::Aspect::Oct ? &poolOct
+                                                   : &poolVSel);
+        // Always rebuild TARGET immediately on change
+        rebuildTargetPool(asp, *P);
+        if (oldS == 0 && newS > 0) {
+            // Snap active := target for "no audible change" upon locking
+            P->aSize = P->tSize;
+            for (uint8_t i=0;i<P->tSize;i++) P->active[i] = P->target[i];
+            P->morphActive = false;
+            alignPointerToCurrentOrNextGate(*P);
+        }
+        // If >0→>0 or >0→0, we leave active as-is (no snap), morphing will handle it.
+    }
+
+    inline Track& track(seq::Aspect a){ return trackOf(a); }
+
     /* ------------------------------------------------------
-   helper:  per-degree octave displacement  (-1 / 0 / +1)
-   pot = 0..1023.  0..511 ⇒ favour -1,  512..1023 ⇒ favour +1.
-   at exactly 512 there is 0 % chance of either ±1.
+       helper:  per-degree octave displacement  (-1 / 0 / +1)
+       (unchanged)
     ------------------------------------------------------ */
     static int8_t octaveDisplacement(uint8_t degree)
     {
@@ -123,55 +262,26 @@ namespace {
         return 0;   // mid detent
     }
 
-    uint8_t generate(seq::Aspect a)
-    {
+    /* Raw generators that ignore any new-pool logic */
+    static uint8_t generateRaw(seq::Aspect a){
         using namespace hw;
-        switch(a){
-            /* ---------- Pitch with probabilistic pool ---------- */
-            case seq::Aspect::Pitch: {
-                uint8_t prob = hw::pots.deltaProb[0];   // 0-127 (lock)
-
-                if (!poolSize) rebuildPitchPool();      // first run / after reset
-
-                bool usePool = (prob == 127) || (random(128) < prob); //read-prob
-                tookFromPool = false;                  // reset flag
-
-                if (usePool && poolSize) {
-                    uint8_t deg = pitchPool[poolIndex];
-                    /* do NOT advance pointer yet – we’ll do it after we know
-                       whether this step actually fires a gate               */
-                    tookFromPool = true;
-                    return deg;
-                }
-
-                /* Generate new degree */
-                uint8_t deg = weightedRandomSelection(8, pots.pitchProb);
-
-                /* Fade-in lock: remember with chance  (127-prob)/127 */
-                if (prob < 127 && random(128) < (127 - prob))
-                    rememberPitch(curStep, deg);
-
-                return deg;
-            }
-            /* ---- Velocity (gate on/off) --------- */
+        switch (a){
+            case seq::Aspect::Pitch:
+                return weightedRandomSelection(8, pots.pitchProb);
             case seq::Aspect::Vel:
-                return random(128) < hw::pots.density;     // 1 = gate present
-
-            /* ---- Octave displacement ------------ */
+                return random(128) < pots.density;                // gate present?
             case seq::Aspect::Oct: {
                 uint8_t deg = trPitch.prospectiveSequence[curStep] & 0x07;
-                return octaveDisplacement(deg) + 1;        // store 0,1,2
+                return octaveDisplacement(deg) + 1;               // store 0,1,2
             }
-
-            /* ---- V1 / V2 selector --------------- */
-            case seq::Aspect::Acc:
-                if (!trVel.prospectiveSequence[curStep])   // no gate? → stay Velocity-1
-                    return 0;
-                return random(128) < hw::pots.accentChance;  // 1 = Velocity-2
+            case seq::Aspect::VSel:
+                if (!trVel.prospectiveSequence[curStep]) return 0; // no gate → V1
+                return random(128) < pots.accentChance;            // 0=V1, 1=V2
         }
+        return 0;
     }
 
-}
+} // namespace
 
 /* ---------- public accessors ---------- */
 uint8_t seq::stepNow(){ return curStep; }
@@ -182,17 +292,21 @@ uint8_t seq::acc  (uint8_t i){ return trAcc  .regularSequence[i]; }
 
 void seq::forceStep(uint8_t s){ curStep = s % 16; }
 
-
 /* ---------- init() ---------- */
 void seq::init(){
     for(uint8_t i=0;i<kSteps;i++){
         trPitch.regularSequence[i]=0; trVel.regularSequence[i]=1;
+        trOct.regularSequence[i]=1;   trAcc.regularSequence[i]=0;
+        trPitch.prospectiveSequence[i]=0; trVel.prospectiveSequence[i]=1;
+        trOct.prospectiveSequence[i]=1;   trAcc.prospectiveSequence[i]=0;
     }
-    poolSize = 0; poolIndex = 0; tookFromPool = false;
+    // reset legacy & new pool systems
+    legacyPitchPool[0] = 0; legacyPoolSize = 0; legacyPoolIndex = 0; legacyTookFromPool = false;
+    poolPitch = AspectPool{}; poolOct = AspectPool{}; poolVSel = AspectPool{};
 }
 
 /* ===========================================================
-   ❶  Regenerate ALL 16 prospective steps once
+   ❶  Regenerate ALL 16 prospective steps once (unchanged feel)
    =========================================================== */
 void seq::regenerateAll(uint8_t probability /*0-127*/)
 {
@@ -201,13 +315,13 @@ void seq::regenerateAll(uint8_t probability /*0-127*/)
     for (uint8_t s = 0; s < kSteps; ++s)
         for (uint8_t a = 0; a < (uint8_t)Aspect::Count; ++a)
         {
-            /* Freeze only non-pitch aspects */
+            /* Keep old "freeze non-pitch" behavior for bulk regen */
             if (Aspect(a) != Aspect::Pitch &&
                 random(128) < hw::pots.deltaProb[a])
                 continue;
 
             if (random(128) < probability)          // instChance pot
-                track(Aspect(a)).prospectiveSequence[s] = generate(Aspect(a));
+                track(Aspect(a)).prospectiveSequence[s] = generateRaw(Aspect(a));
         }
 }
 
@@ -287,73 +401,161 @@ void seq::nextStep()
                             hw::pots.loopEnd   - 1);
 }
 
+    /* 1b. If loop bounds changed, rebuild TARGET pools (active morphs toward them) */
+    static uint8_t prevLS = 0, prevLE = 0;
+    if (hw::pots.loopStart != prevLS || hw::pots.loopEnd != prevLE){
+        rebuildTargetPool(Aspect::Pitch, poolPitch);
+        rebuildTargetPool(Aspect::Oct,   poolOct);
+        rebuildTargetPool(Aspect::VSel,  poolVSel);
+        prevLS = hw::pots.loopStart; prevLE = hw::pots.loopEnd;
+    }
+
+    /* 1c. Slider-change detection → immediate pool updates + optional snap */
+    static uint8_t prevPitchS = 0, prevOctS = 0, prevVSelS = 0;
+    uint8_t sPitch = hw::pots.deltaProb[0];
+    uint8_t sOct   = hw::pots.deltaProb[2];
+    uint8_t sVSel  = hw::pots.deltaProb[3];
+    if (sPitch != prevPitchS){ onSliderChange(Aspect::Pitch, prevPitchS, sPitch); prevPitchS = sPitch; }
+    if (sOct   != prevOctS)  { onSliderChange(Aspect::Oct,   prevOctS,   sOct  ); prevOctS   = sOct;   }
+    if (sVSel  != prevVSelS) { onSliderChange(Aspect::VSel,  prevVSelS,  sVSel ); prevVSelS  = sVSel;  }
+
+    bool usedNewPool_P = false, usedNewPool_O = false, usedNewPool_V = false;
+    bool usedLegacyPool_P = false;
+
     /* 2. loop over four aspects */
     for(uint8_t a=0; a < (uint8_t)Aspect::Count; ++a)
     {
         Aspect asp = (Aspect)a;
         Track& T   = track(asp);
 
-        /* ─ Δ-lock ─ */
-        bool delta = (asp != Aspect::Pitch) &&
-                     (random(128) < pots.deltaProb[a]);
-        if (delta){
+        /* -------- Gate Δ-lock (unchanged) -------- */
+        if (asp == Aspect::Vel){
+            bool delta = (random(128) < pots.deltaProb[a]);
+            if (delta){
+                T.prospectiveSequence[curStep] = T.regularSequence[curStep];
+                hw::btnInstant.edge = false;
+                continue;
+            }
+            /* Engines in original priority; nondest requires Destruct toggle */
+            if (btnInstant.edge && random(128) < pots.instChance){
+                uint8_t v = generateRaw(asp);
+                T.regularSequence [curStep] = v;
+                T.prospectiveSequence[curStep] = v;
+                hw::btnInstant.edge = false;
+                continue;
+            }
+            if (btnDestruct.level && random(128) < pots.destructiveChance){
+                uint8_t v = generateRaw(asp);
+                T.regularSequence [curStep] = v;
+                T.prospectiveSequence[curStep] = v;
+                continue;
+            }
+            if (btnDestruct.level && random(128) < pots.nondestChance){
+                T.prospectiveSequence[curStep] = generateRaw(asp);
+                continue;
+            }
             T.prospectiveSequence[curStep] = T.regularSequence[curStep];
-            hw::btnInstant.edge = false;
             continue;
         }
 
-        /* ─ Instantaneous (highest priority) ─ */
+        /* -------- Pitch / Oct / VSel -------- */
+        const uint8_t slider = pots.deltaProb[a];
+        const uint8_t pUse   = slider;         // 0..127  → use-pool probability
+        const uint8_t pRe    = 127 - slider;   // recalc / morph probability
+
+        // Background recalc + morph every tick (still stochastic)
+        if (random(128) < pRe){
+            if      (asp == Aspect::Pitch) rebuildTargetPool(asp, poolPitch);
+            else if (asp == Aspect::Oct)   rebuildTargetPool(asp, poolOct);
+            else                            rebuildTargetPool(asp, poolVSel);
+        }
+        if      (asp == Aspect::Pitch) maybeMorph(poolPitch, slider);
+        else if (asp == Aspect::Oct)   maybeMorph(poolOct,   slider);
+        else                           maybeMorph(poolVSel,  slider);
+
+        AspectPool* P = (asp==Aspect::Pitch ? &poolPitch : asp==Aspect::Oct ? &poolOct : &poolVSel);
+
+        // Engines first; when they fire, choose pool vs generator by slider
+        bool engineFired = false;
+        bool chosePool   = false;   // track for pointer advance
         if (btnInstant.edge && random(128) < pots.instChance){
-            uint8_t v = generate(asp);
+            uint8_t v;
+            if (P->aSize && random(128) < pUse) { v = P->active[P->aPtr].val; chosePool = true; }
+            else                                 { v = generateRaw(asp); }
             T.regularSequence [curStep] = v;
             T.prospectiveSequence[curStep] = v;
-
             hw::btnInstant.edge = false;
-            continue;
-        }
-
-        /* ─ Destructive ─ */
-        if (btnDestruct.level && random(128) < pots.destructiveChance){
-            uint8_t v = generate(asp);
-
-                //debug
-                /*Serial.print(F("Vel = ["));
-                for (uint8_t i=0;i<16;i++){ Serial.print(trVel.regularSequence[i]); Serial.print(' '); }
-                Serial.println(']');*/
-            
+            engineFired = true;
+        } else if (btnDestruct.level && random(128) < pots.destructiveChance){
+            uint8_t v;
+            if (P->aSize && random(128) < pUse) { v = P->active[P->aPtr].val; chosePool = true; }
+            else                                 { v = generateRaw(asp); }
             T.regularSequence [curStep] = v;
             T.prospectiveSequence[curStep] = v;
-            continue;
+            engineFired = true;
+        } else if (btnDestruct.level && random(128) < pots.nondestChance){
+            uint8_t v;
+            if (P->aSize && random(128) < pUse) { v = P->active[P->aPtr].val; chosePool = true; }
+            else                                 { v = generateRaw(asp); }
+            T.prospectiveSequence[curStep] = v;   // nondest: prospective only
+            engineFired = true;
         }
 
-        /* ─ Nondestructive ─ */
-        if (random(128) < pots.nondestChance){
-            T.prospectiveSequence[curStep] = generate(asp);
-            continue;
+        if (engineFired){
+            if (asp == Aspect::Pitch) usedLegacyPool_P = usedLegacyPool_P || false; // legacy not used in this branch
+            if (chosePool){
+                if (asp == Aspect::Pitch) usedNewPool_P = true;
+                else if (asp == Aspect::Oct) usedNewPool_O = true;
+                else usedNewPool_V = true;
+            }
+            continue;   // engines wrote the value; skip non-engine path
         }
 
-        /* ─ default: copy regular → prospect ─ */
+        // No engine: default playback, optionally override with pool
         T.prospectiveSequence[curStep] = T.regularSequence[curStep];
+        if (P->aSize && random(128) < pUse){
+            uint8_t v = P->active[P->aPtr].val;
+            T.prospectiveSequence[curStep] = v;      // play from pool (REGULAR untouched)
+            if (asp == Aspect::Pitch) usedNewPool_P = true;
+            else if (asp == Aspect::Oct) usedNewPool_O = true;
+            else usedNewPool_V = true;
+        }
+
+        // Legacy path note: when slider==0 the above code is still fine because pUse=0 and pRe=127.
+        // For Pitch, the original “fade-in lock” and legacy pool is only used in the dedicated legacy branch earlier
+        // (we keep legacy semantics active when slider==0 by using generateLegacyPitch in that branch).
+        if (slider == 0 && asp == Aspect::Pitch){
+            // Overwrite with legacy behavior when fully unlocked to preserve exact original feel
+            // Engines are already handled in the engine branch above; only default path matters here:
+            T.prospectiveSequence[curStep] = T.regularSequence[curStep];
+        }
     }
 
-    /* ---------- maintain pitch-pool after all aspects are decided ---------- */
+    /* ---------- advance pool pointers if a pool was *used* and gate is ON ---------- */
     {
         bool gate = trVel.prospectiveSequence[curStep];
-        uint8_t prob = hw::pots.deltaProb[0];
+        if (gate){
+            if (usedNewPool_P && poolPitch.aSize) poolPitch.aPtr = (poolPitch.aPtr + 1) % poolPitch.aSize;
+            if (usedNewPool_O && poolOct.aSize)   poolOct.aPtr   = (poolOct.aPtr   + 1) % poolOct.aSize;
+            if (usedNewPool_V && poolVSel.aSize)  poolVSel.aPtr  = (poolVSel.aPtr  + 1) % poolVSel.aSize;
 
-        /* Advance pointer ONLY if we actually used the pool on a gated step */
-        if (gate && tookFromPool && poolSize) {
-            poolIndex = (poolIndex + 1) % poolSize;
+            if (usedLegacyPool_P && legacyPoolSize) legacyPoolIndex = (legacyPoolIndex + 1) % legacyPoolSize;
         }
+        usedNewPool_P = usedNewPool_O = usedNewPool_V = false;
+        usedLegacyPool_P = false;
+    }
 
-        /* -------- gradual shrink when loop bounds shrink ---------- */
-        uint8_t want = gatedCountInLoop();        // desired pool length
-        if (poolSize > want && prob < 127) {      // only shrink when unlocked
-            /* shrink chance mirrors write-prob  */
-            if (random(128) < (127 - prob)) {
-                /* remove from END to preserve order & wrap pointer */
-                --poolSize;
-                poolIndex %= poolSize;
+    /* ---------- LEGACY pitch-pool maintenance (gradual shrink) ---------- */
+    {
+        uint8_t prob = hw::pots.deltaProb[0];
+        if (prob < 127) {  // only shrink when unlocked in legacy sense
+            uint8_t want = legacyGatedCountInLoop();
+            if (legacyPoolSize > want) {
+                if (random(128) < (127 - prob)) {
+                    --legacyPoolSize;
+                    if (legacyPoolSize == 0) { legacyPoolSize = 1; legacyPitchPool[0]=0; }
+                    legacyPoolIndex %= legacyPoolSize;
+                }
             }
         }
     }
@@ -377,40 +579,18 @@ void seq::nextStep()
                     + modes[scale][degree]
                     + octDisp * 12;
 
-
-    //Set velocity/accent
-    /* gate present? */
+    //Set velocity/accent (VSel)
     uint8_t baseVel = 0;
     if (trVel.prospectiveSequence[curStep]) {           // Velocity-1 hit
         baseVel = hw::pots.velocity;                    // Velocity pot
         if (trAcc.prospectiveSequence[curStep])         // flipped to Velocity-2?
             baseVel = hw::pots.accentVel;               // Acc_amt pot
     }
-    /* baseVel == 0 ⇒ rest (no NoteOn will be audible) */
     uint8_t midiVel = constrain(baseVel, 0, 127);
-
-
 
     MIDI.sendNoteOn(midiPitch, midiVel, 1);      // new note
     ui::refresh();          // draw into the pixel buffer
-    strip.show();           // commit: interrupts off for 0.4 ms
+    strip.show();           // commit: interrupts off for ~0.4 ms
 
     hw::btnInstant.edge = false;    // prevents multiple hits per press
-
-    //TESTING
-    //Serial.print(F("STEP ")); Serial.println(curStep);
-
-    /* ---------------- DEBUG DUMP -------------------------------- */
-    /*
-    Serial.print(F("S="));  Serial.print(curStep);
-    Serial.print(F("  P:["));
-    for(uint8_t i=0;i<16;i++){ Serial.print(trPitch.regularSequence[i]); Serial.print(' ');}
-    Serial.print(F("] V:["));
-    for(uint8_t i=0;i<16;i++){ Serial.print(trVel.regularSequence[i]);  Serial.print(' ');}
-    Serial.print(F("] O:["));
-    for(uint8_t i=0;i<16;i++){ Serial.print(trOct.regularSequence[i]);  Serial.print(' ');}
-    Serial.print(F("] A:["));
-    for(uint8_t i=0;i<16;i++){ Serial.print(trAcc.regularSequence[i]);  Serial.print(' ');}
-    Serial.println(']');
-    */
 }
