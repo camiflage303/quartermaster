@@ -29,6 +29,8 @@ namespace {
 
     /* microsecond phase accumulator for internal clock */
     unsigned long lastIntUs = 0;
+    /* one-shot internal "Start" to mimic external Start behavior */
+    bool intStartFlag = false;
 }
 
 /* ───────── public globals ────────────────────────────────────────────── */
@@ -84,6 +86,7 @@ void clock::hardResetCounters()
     extStepFlag = false;
     intTickCtr  = 0;
     interrupts();
+    lastIntUs = micros();
 }
 void clock::forceStop()   // call if you need an emergency kill
 {
@@ -100,6 +103,7 @@ void clock::service()
     usingExt = hw::btnExtMidi.level;
     bool on  = hw::btnOnOff.level;
     bpm      = hw::pots.bpm;
+    static bool prevOn = false;   // detect OFF→ON edges
 
     /* -------- update pulses-per-step (pot) ------------- */
     uint8_t uiPPS = constrain(hw::pots.pulsesPerStep, 1, 24);  // you choose range
@@ -119,12 +123,26 @@ void clock::service()
     static bool prevUsingExt = usingExt;
     if (usingExt != prevUsingExt) {
         hardResetCounters();
-        lastIntUs = micros();
+        // If we just switched TO internal and transport is ON,
+        // schedule an immediate step to avoid "late first note".
+        if (!usingExt && on) intStartFlag = true;
         prevUsingExt = usingExt;
     }
 
+    /* If the transport just turned ON, flush counters and resync phase to avoid catch-up. */
+    if (on && !prevOn) {
+        hardResetCounters();   // now also resyncs lastIntUs
+    }
+
+
     /* Transport OFF ⇒ everything frozen except MIDI parser in loop() */
-    if (!on) { transportRun = false; return; }
+    if (!on) { transportRun = false; prevOn = on; return; }
+
+    /* Edge: OFF → ON. Resync + schedule immediate first step in internal mode. */
+    if (on && !prevOn) {
+        hardResetCounters();           // now also resyncs lastIntUs
+        if (!usingExt) intStartFlag = true;
+    }
 
     /* =============================================================
        A.  External-clock branch
@@ -152,6 +170,24 @@ void clock::service()
     const float usPerQuarter = 60.0f / bpm * 1e6f;
     const float usPerTick    = usPerQuarter / PPQN;
 
+    /* If we just "started" internally, fire step immediately and align phase. */
+    if (intStartFlag) {
+        intStartFlag = false;
+        lastIntUs = now;               // start phase at "now"
+        intTickCtr = 0;
+        seq::nextStep();               // immediate first note
+        prevOn = on;
+        return;                        // skip tick math this loop
+    }
+
+
+    /* Saturation guard: if we ever fell far behind (e.g., long ISR block),
+       drop phase to "now" instead of bursting to catch up. */
+    if (now - lastIntUs > 2 * usPerTick) {
+        lastIntUs = now;
+    }
+
+
     if (now - lastIntUs >= usPerTick)
     {
         lastIntUs += usPerTick;           // maintain phase
@@ -162,4 +198,5 @@ void clock::service()
             seq::nextStep();
         }
     }
+    prevOn = on;
 }

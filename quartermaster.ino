@@ -10,7 +10,7 @@ void setup(){
     Serial.begin(31250);
     hw::initPins();
     hw::scanInputs();
-    seq::forceStep(hw::pots.loopStart - 1);
+    seq::armReset();
     clock::init();
     seq::init();
     ui::init();
@@ -59,8 +59,8 @@ void loop()
 
     /* ---------- rising edge  (OFF → ON)  ------------------- */
     if ( on && !prevOn ) {
-        uint8_t target = hw::pots.loopStart ? hw::pots.loopStart - 1 : 0;
-        seq::forceStep(target);            // jump to first step *before* clock runs
+        // Don’t pre-advance; let nextStep render the loop-start step
+        seq::armReset();
     }
 
     /* ---------- falling edge  (ON → OFF) -------------------- */

@@ -281,6 +281,26 @@ namespace {
         return 0;
     }
 
+
+    /* Step-indexed raw generator: use state from step 's' (for Instant 16-step fills) */
+    static uint8_t generateRawAt(seq::Aspect a, uint8_t s){
+        using namespace hw;
+        switch (a){
+            case seq::Aspect::Pitch:
+                return weightedRandomSelection(8, pots.pitchProb);
+            case seq::Aspect::Vel:
+                return random(128) < pots.density;
+            case seq::Aspect::Oct: {
+                uint8_t deg = trPitch.prospectiveSequence[s] & 0x07;
+                return octaveDisplacement(deg) + 1;                 // 0,1,2
+            }
+            case seq::Aspect::VSel:
+                if (!trVel.prospectiveSequence[s]) return 0;        // only accent if gated
+                return random(128) < pots.accentChance;             // respects mix pot
+        }
+        return 0;
+    }
+
 } // namespace
 
 /* ---------- public accessors ---------- */
@@ -312,17 +332,23 @@ void seq::regenerateAll(uint8_t probability /*0-127*/)
 {
     using namespace hw;
 
-    for (uint8_t s = 0; s < kSteps; ++s)
-        for (uint8_t a = 0; a < (uint8_t)Aspect::Count; ++a)
-        {
+    /* Generate in a stable per-step order so Oct/VSel can see the just-made Pitch/Vel */
+    const Aspect order[4] = { Aspect::Pitch, Aspect::Vel, Aspect::Oct, Aspect::VSel };
+
+    for (uint8_t s = 0; s < kSteps; ++s) {
+        for (uint8_t i = 0; i < 4; ++i) {
+            Aspect asp = order[i];
+
             /* Keep old "freeze non-pitch" behavior for bulk regen */
-            if (Aspect(a) != Aspect::Pitch &&
-                random(128) < hw::pots.deltaProb[a])
+            if (asp != Aspect::Pitch && random(128) < pots.deltaProb[(uint8_t)asp])
                 continue;
 
-            if (random(128) < probability)          // instChance pot
-                track(Aspect(a)).prospectiveSequence[s] = generateRaw(Aspect(a));
+            if (random(128) < probability) {
+                uint8_t v = generateRawAt(asp, s);
+                track(asp).prospectiveSequence[s] = v;
+            }
         }
+    }
 }
 
 /* ===========================================================

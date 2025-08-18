@@ -11,11 +11,10 @@ Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 /* ───────── cached previous state ───── */
 static uint8_t  prevStep      = 255;      // invalid → forces first paint
-static uint8_t  prevLoopMin   = 0;
-static uint8_t  prevLoopMax   = 0;
-static uint8_t  prevVel[NUM_LEDS] = {0};
-
-static bool ledsDirty = false;           // set → something changed this frame
+static uint8_t  prevLoopLo    = 0;        // last painted lo (0..15)
+static uint8_t  prevLoopHi    = 15;       // last painted hi (0..15)
+static uint8_t  prevVel[NUM_LEDS] = {0};  // 0=off,1=v1,2=v2,3=left marker,4=right marker
+static bool     ledsDirty = false;
 
 /* quick helpers */
 inline void px(uint8_t i,uint8_t r,uint8_t g,uint8_t b){
@@ -28,12 +27,12 @@ inline void px(uint8_t i,uint8_t r,uint8_t g,uint8_t b){
 
 /* colour palette (tweak to taste) */
 struct RGB { uint8_t r,g,b; };
-constexpr RGB CLR_OFF      {  0,  0,  0};
-constexpr RGB CLR_OUTSIDE  {  0,  0,  0};     // off
-constexpr RGB CLR_MARK_END {  8,  0,  0};     // dim red  (loop-end marker)
-constexpr RGB CLR_MARK_ST  {  8,  0,  0};     // dim red  (loop-start marker)
-constexpr RGB CLR_PLAY_LOOP{ 80, 80, 40};     // warm white
-constexpr RGB CLR_PLAY_GEN { 40, 40, 20};     // dim warm white
+constexpr RGB CLR_OFF       {  0,  0,  0};
+constexpr RGB CLR_OUTSIDE   {  0,  0,  0};     // off
+constexpr RGB CLR_MARK_L    {  8,  0,  0};     // dim red  (left/outside-before band)
+constexpr RGB CLR_MARK_R    {  8,  0,  0};     // dim red  (right/outside-after band)
+constexpr RGB CLR_PLAY_LOOP { 80, 80, 40};     // warm white
+constexpr RGB CLR_PLAY_GEN  { 40, 40, 20};     // dim warm white
 
 /* ---------- heat-map with full blue→red sweep + brightness ramp ---------- */
 constexpr uint8_t MAX_BRIGHT = 127;     // peak LED intensity (0-255)
@@ -82,8 +81,6 @@ static inline RGB heatColor(uint8_t vel)
 inline RGB colour_v1() { return heatColor(hw::pots.velocity ); }
 inline RGB colour_v2() { return heatColor(hw::pots.accentVel); }
 
-
-
 inline void flashLed(uint8_t ledIdx, RGB colour, uint8_t frames=4)
 {
     static uint8_t timer[8]={0};
@@ -103,82 +100,122 @@ void ui::init(){
     strip.show();                 // clear
 }
 
-/* ── marker helpers ───────────────────────────────────────────────
-   Return -1 when the marker should be hidden (start=1 or end=16). */
+/* ── loop/marker helpers (deterministic, non-wrapping band) ───────── */
 
-inline int8_t markerStartIx()      /* dim-magenta */
-{
-    uint8_t s = hw::pots.loopStart ? hw::pots.loopStart-1 : 0;
-    uint8_t e = hw::pots.loopEnd   ? hw::pots.loopEnd  -1 : 0;
-    bool wrap = s > e;
-
-    if (!wrap && s == 0) return -1;            // hide when start = 1
-    return wrap ? (s + 1)  & 0x0F              // one AFTER when wrapped
-                : (s + 15) & 0x0F;             // one BEFORE otherwise
+/* Read pots → 0..15 indices */
+static inline void readBounds(uint8_t &s, uint8_t &e){
+    s = hw::pots.loopStart ? hw::pots.loopStart - 1 : 0;
+    e = hw::pots.loopEnd   ? hw::pots.loopEnd   - 1 : 15;
 }
 
-inline int8_t markerEndIx()        /* dim-white  */
-{
-    uint8_t s = hw::pots.loopStart ? hw::pots.loopStart-1 : 0;
-    uint8_t e = hw::pots.loopEnd   ? hw::pots.loopEnd  -1 : 0;
-    bool wrap = s > e;
+/* Compute non-wrapped band [lo..hi] regardless of which bound is “start” */
+static inline void bandLoHi(uint8_t &lo, uint8_t &hi){
+    uint8_t s,e; readBounds(s,e);
+    if (s <= e) { lo = s; hi = e; }
+    else        { lo = e; hi = s; }
+}
 
-    if (!wrap && e == 15) return -1;           // hide when end = 16
-    return wrap ? (e + 15) & 0x0F              // one BEFORE when wrapped
-                : (e + 1)  & 0x0F;             // one AFTER otherwise
+/* Length (inclusive) of the non-wrapped band */
+static inline uint8_t bandLen(){
+    uint8_t lo,hi; bandLoHi(lo,hi);
+    return uint8_t(hi - lo + 1);    // 1..16
+}
+
+/* Outside markers: left = lo-1, right = hi+1 (mod 16). Hidden when band is full-width. */
+static inline int8_t markerLeftIx(){
+    if (bandLen() == 16) return -1;                 // full width ⇒ no markers
+    uint8_t s,e; readBounds(s,e);
+    uint8_t lo,hi; bandLoHi(lo,hi);
+    if (s == 0 || e == 0) return -1;                // hide when either bound == 1
+    return int8_t((lo + 15) & 0x0F);                // one BEFORE band (wrap-safe)
+}
+static inline int8_t markerRightIx(){
+    if (bandLen() == 16) return -1;                 // full width ⇒ no markers
+    uint8_t s,e; readBounds(s,e);
+    uint8_t lo,hi; bandLoHi(lo,hi);
+    if (e == 15 || s == 15) return -1;              // hide when either bound == 16
+    return int8_t((hi + 1) & 0x0F);                 // one AFTER band (wrap-safe)
+}
+
+/* Test if index is inside the band (non-wrapped) */
+static inline bool inBand(uint8_t idx, uint8_t lo, uint8_t hi){
+    return (idx >= lo && idx <= hi);
 }
 
 static void paintStaticRegion()
 {
-    /* loop range */
-    uint8_t lo = hw::pots.loopStart-1;        // 0-15
-    uint8_t hi = hw::pots.loopEnd  -1;
-    if (lo > hi) { uint8_t tmp = lo; lo = hi; hi = tmp; }
-
-    /*for(uint8_t i=0;i<NUM_LEDS;i++){
-        RGB c = (i<lo || i>hi) ? CLR_OUTSIDE
-                               : (seq::vel(i)? CLR_INSIDE : CLR_OFF);
-        px(i,c.r,c.g,c.b);
-        prevVel[i] = seq::vel(i);
-    }*/
-
-    int8_t ixSt  = markerStartIx();
-    int8_t ixEnd = markerEndIx();
+    uint8_t lo,hi; bandLoHi(lo,hi);
+    int8_t ixL = markerLeftIx();
+    int8_t ixR = markerRightIx();
 
     for (uint8_t i = 0; i < NUM_LEDS; ++i) {
         RGB c;
-        if (i == ixSt) {                 // marker BEFORE start
-            c = CLR_MARK_ST;
-        } else if (i == ixEnd) {            // marker AFTER end
-            c = CLR_MARK_END;
-        } else if (i < lo || i > hi) {        // completely outside
-            c = CLR_OUTSIDE;
-        } else if (seq::vel(i)) {             // gate present?
-            c = seq::acc(i) ? colour_v2()     // Velocity-2 hit (yellow, scaled)
-                            : colour_v1();    // Velocity-1 hit (green,  scaled)
-        } else {                              // rest
-            c = CLR_OFF;
+        if (i == ixL) {                     // left/outside-before marker
+            c = CLR_MARK_L;
+        } else if (i == ixR) {              // right/outside-after marker
+            c = CLR_MARK_R;
+        } else if (inBand(i,lo,hi)) {       // inside the band
+            if (seq::vel(i)) {
+                c = seq::acc(i) ? colour_v2() : colour_v1();
+            } else {
+                c = CLR_OFF;                // rest inside band
+            }
+        } else {
+            c = CLR_OUTSIDE;                // completely outside band
         }
+
         px(i, c.r, c.g, c.b);
 
-        uint8_t type = 0;                          // 0 = off/rest
-        if      (i == ixSt)  type = 3;             // magenta marker
-        else if (i == ixEnd) type = 4;             // white   marker
+        uint8_t type = 0;                   // 0 = off/rest
+        if      (i == ixL) type = 3;        // left marker
+        else if (i == ixR) type = 4;        // right marker
         else if (seq::vel(i)) type = seq::acc(i) ? 2 : 1;
         prevVel[i] = type;
     }
 
-    prevLoopMin = lo;
-    prevLoopMax = hi;
+    prevLoopLo = lo;
+    prevLoopHi = hi;
 }
 
 void ui::refresh()
 {
-    //if (clock::usingExt) return;      // ❶ DON’T touch LEDs while external sync is active
-    /* flash on edges ------------------------------------------------ */
-//if(hw::btnCycleL.edge) flashLed(3, {0,60,0});       // green
-//if(hw::btnCycleR.edge) flashLed(5, {0,60,0});
-//if(hw::btnReset .edge) flashLed(4, {0, 0,60});      // blue
+    // Hide playhead when transport is OFF, and suppress head on first ON frame
+    static bool     prevOn = true;
+    static bool     waitingForFirstStep = false;
+    static uint8_t  stepAtOn = 0;   // step we were parked at when ON was pressed
+    bool on = hw::btnOnOff.level;
+
+    if (!on) {
+        paintStaticRegion();         // show markers + gates only
+        prevStep = 255;              // forget old head
+        ledsDirty = true; strip.show(); ledsDirty = false;
+        prevOn = on;
+        waitingForFirstStep = false; // reset any arming
+        return;                      // no head while OFF
+    }
+
+    // OFF → ON edge: arm "wait for first step change" and paint static once
+    if (on && !prevOn) {
+        waitingForFirstStep = true;
+        stepAtOn = seq::stepNow();   // typically the parked position
+        paintStaticRegion();
+        prevStep = 255;
+        ledsDirty = true; strip.show(); ledsDirty = false;
+        prevOn = on;
+        return;
+    }
+    prevOn = on;
+
+    // While armed, suppress head until the sequencer actually advances
+    if (waitingForFirstStep) {
+        if (seq::stepNow() == stepAtOn) {
+            paintStaticRegion();
+            ledsDirty = true; strip.show(); ledsDirty = false;
+            return;
+        }
+        waitingForFirstStep = false;
+        prevStep = 255;  // force head repaint on first visible step
+    }
 
     bool needFull = false;
 
@@ -191,11 +228,9 @@ void ui::refresh()
     }
 
     /* 1. detect whether static region must be repainted ── */
-    uint8_t lo = hw::pots.loopStart - 1;
-    uint8_t hi = hw::pots.loopEnd   - 1;
-    if (lo > hi) { uint8_t t = lo; lo = hi; hi = t; }   // swap for reverse
+    uint8_t lo,hi; bandLoHi(lo,hi);
 
-    if (lo != prevLoopMin || hi != prevLoopMax) {
+    if (lo != prevLoopLo || hi != prevLoopHi) {
         needFull = true;                 /* pots moved → repaint band   */
     } else {
         for (uint8_t i = 0; i < NUM_LEDS; ++i) {
@@ -208,46 +243,48 @@ void ui::refresh()
         prevStep = 255;                  /* force head redraw too      */
         ledsDirty = true;
 
-        strip.show();                 // one 0.4 ms block – happens rarely
-        ledsDirty = false;            // buffer is now clean
+        strip.show();                    // one 0.4 ms block – happens rarely
+        ledsDirty = false;               // buffer is now clean
     }
 
     /* 2. head / play-cursor ───────────────────────────────── */
     uint8_t step = seq::stepNow();           // 0-15
-    bool oneStepLoop = (prevLoopMin == prevLoopMax);
+    bool oneStepLoop = (prevLoopLo == prevLoopHi);   // 1-step band
 
     if (needFull || step != prevStep || oneStepLoop) {
         /* erase old -------- */
         if (prevStep < NUM_LEDS) {
             uint8_t i = prevStep;
-            int8_t ixSt  = markerStartIx();
-            int8_t ixEnd = markerEndIx();
+            int8_t ixL = markerLeftIx();
+            int8_t ixR = markerRightIx();
 
             RGB c;
-            if (i == ixSt) {                   // magenta marker
-                c = CLR_MARK_ST;
-            } else if (i == ixEnd) {         // white marker
-                c = CLR_MARK_END;
-            } else if (i < prevLoopMin || i > prevLoopMax) {
+            if (i == ixL) {
+                c = CLR_MARK_L;
+            } else if (i == ixR) {
+                c = CLR_MARK_R;
+            } else if (inBand(i, prevLoopLo, prevLoopHi)) {
+                if (seq::vel(i)) {
+                    c = seq::acc(i) ? colour_v2() : colour_v1();
+                } else {
+                    c = CLR_OFF;
+                }
+            } else {
                 c = CLR_OUTSIDE;
-            } else if (seq::vel(i)) {
-                c = seq::acc(i) ? colour_v2()                  // Velocity-2 (yellow, scaled)
-                                : colour_v1();                 // Velocity-1 (green,  scaled)
-            } else {                                           // rest
-                c = CLR_OFF;
             }
             px(i, c.r, c.g, c.b);
-            uint8_t type = 0;                    // 0 = off/rest
-            if      (i == ixSt)      type = 3;   // magenta marker
-            else if (i == ixEnd)     type = 4;   // white   marker
-            else if (seq::vel(i))    type = seq::acc(i) ? 2 : 1;
+
+            uint8_t type = 0;
+            if      (i == ixL) type = 3;
+            else if (i == ixR) type = 4;
+            else if (seq::vel(i)) type = seq::acc(i) ? 2 : 1;
             prevVel[i] = type;
         }
 
         /* draw new -------- */
         RGB head = seq::vel(step) ? CLR_PLAY_LOOP : CLR_PLAY_GEN;
-        if (hw::btnInstant.edge)       head = {60,60, 0};   // yellow flash
-        else if (hw::btnDestruct.edge) head = {60, 0, 0};   // red flash
+        if (hw::btnInstant.edge)       head = (RGB{60,60, 0});   // yellow flash
+        else if (hw::btnDestruct.edge) head = (RGB{60, 0, 0});   // red flash
         px(step, head.r, head.g, head.b);
 
         prevStep = step;
@@ -255,17 +292,14 @@ void ui::refresh()
 
     /* ---------- commit to strip ---------- */
     if (ledsDirty) {
-
         if (!clock::usingExt) {
             /* internal-clock mode – safe to block right now */
             strip.show();
             ledsDirty = false;
-        }
-        else {
+        } else {
             /* external sync: defer the blocking call until the exact
                instant a new step has *already* arrived → we piggy-back
-               on the gap we know is safe (Option 1 throttle).           */
+               on the gap we know is safe (Option 1 throttle). */
         }
     }
 }
-
