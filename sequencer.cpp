@@ -24,16 +24,23 @@ namespace {
 
     constexpr uint8_t kSteps = 16;
 
-    static uint8_t advanceWithin(uint8_t s, uint8_t a, uint8_t b) //bounded advance
+    static uint8_t advanceWithin(uint8_t s, uint8_t a, uint8_t b)
     {
-        /* a = start pot-1,  b = end pot-1   (0-15)            */
-        if (a == b) return a;                 // 1-step loop
+        // 1-step loop ⇒ always park on 'a'
+        if (a == b) return a;
 
-        if (a < b) {                          // forward
-            return (s < b) ? s + 1 : a;
-        } else {                              // reverse (start > end)
-            return (s > b) ? s - 1 : a;
-        }
+        // Non-wrapped band test:
+        //  - forward (a < b):  [a..b]
+        //  - reverse (a > b):  [b..a]
+        const bool inBand = (a <= b) ? (s >= a && s <= b)
+                                    : (s >= b && s <= a);
+
+        // If we're outside, snap to 'a' on this advance (so jump happens at the *next* tick)
+        if (!inBand) return a;
+
+        // Normal advance: forward when a<b, reverse when a>b
+        if (a < b)  return (s < b) ? (uint8_t)(s + 1) : a;
+        else        return (s > b) ? (uint8_t)(s - 1) : a;
     }
 
     struct Track { uint8_t regularSequence[kSteps]={0}; uint8_t prospectiveSequence[kSteps]={0}; };
@@ -251,15 +258,27 @@ namespace {
     ------------------------------------------------------ */
     static int8_t octaveDisplacement(uint8_t degree)
     {
-        uint16_t v = hw::pots.octaveProb[degree];   // raw pot
-        if (v < 62){
-            uint16_t chance = map(v, 0,63, 127,0);         // 0 ➜ 100 %,  62 ➜ 0 %
+        // v in [0..128] (after fixing map to 1023 and clamping)
+        uint16_t v = hw::pots.octaveProb[degree];
+
+        // snap unmistakable endpoints
+        if (v <= 2)   return -1;   // hard down
+        if (v >= 126) return +1;   // hard up
+
+        // wide, symmetric deadband around center
+        const int MID = 64;
+        const int DZ  = 8;   // try 8..12 based on taste
+
+        if (v < MID - DZ) {
+            // map lower side to probability 0..127 if you still want "chance"
+            uint8_t chance = map((int)v, 0, MID - DZ - 1, 127, 0);
             return (random(128) < chance) ? -1 : 0;
-        }else if (v > 64){
-            uint16_t chance = map(v, 64,127, 0,127);      // 64 ➜ 0 %,  127 ➜ 100 %
+        } else if (v > MID + DZ) {
+            uint8_t chance = map((int)v, MID + DZ + 1, 128, 0, 127);
             return (random(128) < chance) ? +1 : 0;
+        } else {
+            return 0;  // rock-solid "no octave"
         }
-        return 0;   // mid detent
     }
 
     /* Raw generators that ignore any new-pool logic */

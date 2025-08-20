@@ -148,26 +148,43 @@ void hw::scanInputs()
     pots.pitchProb[6]          = map(pot(IDX_SLIDE_7), 0,1024,127,-1);
     pots.pitchProb[7]          = map(pot(IDX_SLIDE_8), 0,1024,127,-1);
 
-    pots.octaveProb[0]         = map(pot(IDX_OCT_1),   0,1024, 0, 128);
-    pots.octaveProb[1]         = map(pot(IDX_OCT_2),   0,1024, 0, 128);
-    pots.octaveProb[2]         = map(pot(IDX_OCT_3),   0,1024, 0, 128);
-    pots.octaveProb[3]         = map(pot(IDX_OCT_4),   0,1024, 0, 128);
-    pots.octaveProb[4]         = map(pot(IDX_OCT_5),   0,1024, 0, 128);
-    pots.octaveProb[5]         = map(pot(IDX_OCT_6),   0,1024, 0, 128);
-    pots.octaveProb[6]         = map(pot(IDX_OCT_7),   0,1024, 0, 128);
-    pots.octaveProb[7]         = map(pot(IDX_OCT_8),   0,1024, 0, 128);
+    pots.octaveProb[0]         = map(pot(IDX_OCT_1),   0,1023, 0, 128);
+    pots.octaveProb[1]         = map(pot(IDX_OCT_2),   0,1023, 0, 128);
+    pots.octaveProb[2]         = map(pot(IDX_OCT_3),   0,1023, 0, 128);
+    pots.octaveProb[3]         = map(pot(IDX_OCT_4),   0,1023, 0, 128);
+    pots.octaveProb[4]         = map(pot(IDX_OCT_5),   0,1023, 0, 128);
+    pots.octaveProb[5]         = map(pot(IDX_OCT_6),   0,1023, 0, 128);
+    pots.octaveProb[6]         = map(pot(IDX_OCT_7),   0,1023, 0, 128);
+    pots.octaveProb[7]         = map(pot(IDX_OCT_8),   0,1023, 0, 128);
 
-    pots.density               = map(pot(IDX_DENSITY_POT), 0,1024, 0, 128);
+    // --- Density pot with top snap + hysteresis ---
+    {
+        int raw = pot(IDX_DENSITY_POT);
+
+        // hysteresis thresholds (tweak to taste)
+        const int SAT_RAW    = 990;  // go to 100% if ADC >= this
+        const int UNSNAP_RAW = 975;  // drop below 100% only if ADC <= this
+
+        static bool sat = false;
+        if (raw >= SAT_RAW)         sat = true;
+        else if (raw <= UNSNAP_RAW) sat = false;
+
+        if (sat) {
+            pots.density = 128;  // guaranteed max density
+        } else {
+            pots.density = (uint8_t)constrain(map(raw, 0, SAT_RAW, 0, 127), 0, 127);
+        }
+    }
 
     pots.deltaProb[0]          = map(pot(IDX_DELTA_PITCH), 0,1024, 127,-1);
     pots.deltaProb[1]          = map(pot(IDX_DELTA_VEL  ), 0,1024, 127,-1);
     pots.deltaProb[2]          = map(pot(IDX_DELTA_OCT  ), 0,1024, 127,-1);
     pots.deltaProb[3]          = map(pot(IDX_DELTA_ACC  ), 0,1024, 127,-1);
 
-    pots.destructiveChance     = map(pot(IDX_DESTRUCT_POT), 0,1024, 0,128);
-    pots.nondestChance         = map(pot(IDX_NONDEST_POT ), 0,1024, 0,128);
-    pots.instChance            = map(pot(IDX_INST_POT    ), 0,1024, 0,128);
-    pots.accentChance          = map(pot(IDX_ACC_PROB_POT ), 0,1024, 0,128);
+    pots.destructiveChance     = map(pot(IDX_DESTRUCT_POT), 0,1023, 0,128);
+    pots.nondestChance         = map(pot(IDX_NONDEST_POT ), 0,1023, 0,128);
+    pots.instChance            = map(pot(IDX_INST_POT    ), 0,1023, 0,128);
+    pots.accentChance          = map(pot(IDX_ACC_PROB_POT ), 0,1023, 0,128);
 
     pots.bpm                   = map(pot(IDX_TEMPO_POT   ), 0,1023, 3,303);
     uint8_t ix = map(pot(IDX_TEMPO_POT), 0,1024, 0,9);   // 0-8
@@ -175,7 +192,7 @@ void hw::scanInputs()
 
     pots.loopStart             = map(pot(IDX_LOOP_START  ), 0,1024, 1, 17);
     pots.loopEnd               = map(pot(IDX_LOOP_END    ), 0,1024, 1, 17);
-    pots.root                  = map(pot(IDX_ROOT_POT    ), 0,1024, 0,128);
+    pots.root                  = map(pot(IDX_ROOT_POT    ), 0,1023, 12,108);
     pots.velocity              = map(pot(IDX_VELOCITY_POT), 0,1024, 0,128);
     pots.accentVel             = map(pot(IDX_ACC_AMT_POT ), 0,1024, 0,128);
     pots.scale                 = map(pot(IDX_SCALE_POT   ), 0,1024, 1,  8);
