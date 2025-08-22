@@ -1,4 +1,5 @@
 #include "hw_inputs.h"
+#include "sequencer.h"    // for seq::markLoopBoundsDirty()
 #include <Arduino.h>
 
 /* ───────────── 1. Physical pin mapping  ──────────────────── */
@@ -7,6 +8,9 @@ constexpr uint8_t MUX_SIG[3] = {A5, A6, A4};
 constexpr uint8_t LED_PINS[8] = {A7, 7, 8, 9, 10, 11, 12, 13};
 static uint8_t    ledTimer[8] = {0};
 constexpr uint8_t kPpsLookup[9] = {96,72,48,32,24,18,12,9,6}; // 1, d2,2,d4,4,d8,8,d16,16
+
+// strictly divides 96: 96, 48, 32, 24, 16, 12, 8, 6
+constexpr uint8_t kPpsLocked[] = {96,48,24,12,6};
 
 /* ───────────── 2. Raw-input descriptor  ──────────────────── */
 struct Input { uint8_t mux, ch; bool isButton; int lastVal; bool led; int8_t ledIdx; };
@@ -187,11 +191,20 @@ void hw::scanInputs()
     pots.accentChance          = map(pot(IDX_ACC_PROB_POT ), 0,1023, 0,128);
 
     pots.bpm                   = map(pot(IDX_TEMPO_POT   ), 0,1023, 3,303);
-    uint8_t ix = map(pot(IDX_TEMPO_POT), 0,1024, 0,9);   // 0-8
-    pots.pulsesPerStep = kPpsLookup[ix];
+    uint8_t ix = map(pot(IDX_TEMPO_POT), 0,1024, 0,5);   // 0-8
+    pots.pulsesPerStep = kPpsLocked[ix];
 
     pots.loopStart             = map(pot(IDX_LOOP_START  ), 0,1024, 1, 17);
     pots.loopEnd               = map(pot(IDX_LOOP_END    ), 0,1024, 1, 17);
+
+    // Notify sequencer when loop bounds change so it can rebuild pools off-tick
+    {
+        static uint8_t _prevLS = 0, _prevLE = 0;
+        if (pots.loopStart != _prevLS || pots.loopEnd != _prevLE) {
+            seq::markLoopBoundsDirty();
+            _prevLS = pots.loopStart; _prevLE = pots.loopEnd;
+        }
+    }
     pots.root                  = map(pot(IDX_ROOT_POT    ), 0,1023, 12,108);
     pots.velocity              = map(pot(IDX_VELOCITY_POT), 0,1024, 0,128);
     pots.accentVel             = map(pot(IDX_ACC_AMT_POT ), 0,1024, 0,128);

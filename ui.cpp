@@ -1,8 +1,23 @@
 #include "ui.h"
 #include "sequencer.h"
 #include "hw_inputs.h"
-#include <Adafruit_NeoPixel.h>
 #include "clock_engine.h"
+
+#if DISABLE_LEDS
+
+/* ----------------------------------------------------
+   LED/UI fully disabled build
+   ---------------------------------------------------- */
+DummyStrip strip;
+
+void ui::init() {}
+void ui::refresh() {}
+void ui::commitAfterStepIfNeededExt() {}
+
+#else
+
+/* ===== Original UI with NeoPixel LEDs (unchanged) ===== */
+#include <Adafruit_NeoPixel.h>
 
 /* ───────── NeoPixel hardware ───────── */
 constexpr uint8_t LED_PIN   = 6;      // same as your old build
@@ -188,7 +203,11 @@ void ui::refresh()
     if (!on) {
         paintStaticRegion();         // show markers + gates only
         prevStep = 255;              // forget old head
-        ledsDirty = true; strip.show(); ledsDirty = false;
+        ledsDirty = true;
+        if (!clock::usingExt) {
+            strip.show();
+            ledsDirty = false;
+        }
         prevOn = on;
         waitingForFirstStep = false; // reset any arming
         return;                      // no head while OFF
@@ -200,7 +219,11 @@ void ui::refresh()
         stepAtOn = seq::stepNow();   // typically the parked position
         paintStaticRegion();
         prevStep = 255;
-        ledsDirty = true; strip.show(); ledsDirty = false;
+        ledsDirty = true;
+        if (!clock::usingExt) {
+            strip.show();
+            ledsDirty = false;
+        }
         prevOn = on;
         return;
     }
@@ -210,7 +233,11 @@ void ui::refresh()
     if (waitingForFirstStep) {
         if (seq::stepNow() == stepAtOn) {
             paintStaticRegion();
-            ledsDirty = true; strip.show(); ledsDirty = false;
+            ledsDirty = true;
+            if (!clock::usingExt) {
+                strip.show();
+                ledsDirty = false;
+            }
             return;
         }
         waitingForFirstStep = false;
@@ -243,8 +270,10 @@ void ui::refresh()
         prevStep = 255;                  /* force head redraw too      */
         ledsDirty = true;
 
-        strip.show();                    // one 0.4 ms block – happens rarely
-        ledsDirty = false;               // buffer is now clean
+        if (!clock::usingExt){
+            strip.show();
+            ledsDirty = false;
+        }
     }
 
     /* 2. head / play-cursor ───────────────────────────────── */
@@ -303,3 +332,14 @@ void ui::refresh()
         }
     }
 }
+
+/* Commit exactly once per step when using external clock (safe timing window). */
+void ui::commitAfterStepIfNeededExt() {
+    if (!clock::usingExt) return;
+    if (ledsDirty) {
+        strip.show();     // ~0.4 ms; call this right after a step edge
+        ledsDirty = false;
+    }
+}
+
+#endif // DISABLE_LEDS

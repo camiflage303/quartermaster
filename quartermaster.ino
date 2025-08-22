@@ -20,13 +20,19 @@ void setup(){
 void loop()
 {
     hw::scanInputs();
-    MIDI.read();
+    // Drain all pending MIDI bytes this pass so callbacks stay timely
+    while (MIDI.read()) { /* handlers will run here */ }
+
+    // Do background (non-timing-critical) sequencer work *between* ticks
+    seq::serviceBackground();
 
     if (hw::btnInstant.edge) {                         //   BTN_INST
         seq::regenerateAll(hw::pots.instChance);       //   make 16 new prospect notes
         seq::commitProspect();                         //   and commit at once
         ui::refresh();   // redraw pixels to show the new pattern
-        strip.show();    // commit once (still < 0.5 ms)
+        if (!clock::usingExt) {                        // don't block during external sync
+            strip.show();
+        }        
         hw::btnInstant.edge = false;
     }
 
@@ -72,7 +78,7 @@ void loop()
 
     /* ---------- run clock only while ON --------------------- */
     if (on) {
-        clock::usingExt = hw::btnExtMidi.level;
+        // usingExt is managed inside clock::service()
         clock::service();
     }
 

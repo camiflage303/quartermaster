@@ -15,6 +15,9 @@ namespace seq {
     void rotateAllLeft();
     void rotateAllRight();
     void armReset();
+    // NEW: non-tick background work
+    void serviceBackground();
+    void markLoopBoundsDirty();
 
     /* expose read-only state for UI */
     uint8_t stepNow();               // 0-15

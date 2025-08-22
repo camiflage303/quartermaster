@@ -133,6 +133,7 @@ namespace {
     };
 
     static AspectPool poolPitch, poolOct, poolVSel;
+    static volatile bool loopBoundsDirty = false;
 
     static inline void stepsInLoop(uint8_t* out, uint8_t& n){
         uint8_t a = hw::pots.loopStart ? hw::pots.loopStart - 1 : 0;
@@ -322,6 +323,33 @@ namespace {
 
 } // namespace
 
+void seq::markLoopBoundsDirty(){ loopBoundsDirty = true; }
+
+// Run this every loop() – it’s cheap and avoids doing heavy work on the tick.
+void seq::serviceBackground()
+{
+    // Rebuild target pools when loop bounds change or when flagged explicitly
+    static uint8_t prevLS = 0, prevLE = 0;
+    if (loopBoundsDirty ||
+        hw::pots.loopStart != prevLS || hw::pots.loopEnd != prevLE)
+    {
+        rebuildTargetPool(Aspect::Pitch, poolPitch);
+        rebuildTargetPool(Aspect::Oct,   poolOct);
+        rebuildTargetPool(Aspect::VSel,  poolVSel);
+        prevLS = hw::pots.loopStart; prevLE = hw::pots.loopEnd;
+        loopBoundsDirty = false;
+    }
+
+    // Slider-change detection → pool updates and optional snap
+    static uint8_t prevPitchS = 0, prevOctS = 0, prevVSelS = 0;
+    uint8_t sPitch = hw::pots.deltaProb[0];
+    uint8_t sOct   = hw::pots.deltaProb[2];
+    uint8_t sVSel  = hw::pots.deltaProb[3];
+    if (sPitch != prevPitchS){ onSliderChange(Aspect::Pitch, prevPitchS, sPitch); prevPitchS = sPitch; }
+    if (sOct   != prevOctS)  { onSliderChange(Aspect::Oct,   prevOctS,   sOct  ); prevOctS   = sOct;   }
+    if (sVSel  != prevVSelS) { onSliderChange(Aspect::VSel,  prevVSelS,  sVSel ); prevVSelS  = sVSel;  }
+}
+
 /* ---------- public accessors ---------- */
 uint8_t seq::stepNow(){ return curStep; }
 uint8_t seq::pitch(uint8_t i){ return trPitch.regularSequence[i]; }
@@ -445,8 +473,9 @@ void seq::nextStep()
                             hw::pots.loopStart - 1,
                             hw::pots.loopEnd   - 1);
 }
-
+    
     /* 1b. If loop bounds changed, rebuild TARGET pools (active morphs toward them) */
+    /*
     static uint8_t prevLS = 0, prevLE = 0;
     if (hw::pots.loopStart != prevLS || hw::pots.loopEnd != prevLE){
         rebuildTargetPool(Aspect::Pitch, poolPitch);
@@ -456,13 +485,15 @@ void seq::nextStep()
     }
 
     /* 1c. Slider-change detection → immediate pool updates + optional snap */
-    static uint8_t prevPitchS = 0, prevOctS = 0, prevVSelS = 0;
+    /*static uint8_t prevPitchS = 0, prevOctS = 0, prevVSelS = 0;
     uint8_t sPitch = hw::pots.deltaProb[0];
     uint8_t sOct   = hw::pots.deltaProb[2];
     uint8_t sVSel  = hw::pots.deltaProb[3];
     if (sPitch != prevPitchS){ onSliderChange(Aspect::Pitch, prevPitchS, sPitch); prevPitchS = sPitch; }
     if (sOct   != prevOctS)  { onSliderChange(Aspect::Oct,   prevOctS,   sOct  ); prevOctS   = sOct;   }
     if (sVSel  != prevVSelS) { onSliderChange(Aspect::VSel,  prevVSelS,  sVSel ); prevVSelS  = sVSel;  }
+    */
+    // (heavy pool rebuilds & slider-change handling moved to serviceBackground())
 
     bool usedNewPool_P = false, usedNewPool_O = false, usedNewPool_V = false;
     bool usedLegacyPool_P = false;
@@ -509,11 +540,12 @@ void seq::nextStep()
         const uint8_t pRe    = 127 - slider;   // recalc / morph probability
 
         // Background recalc + morph every tick (still stochastic)
-        if (random(128) < pRe){
+        /*if (random(128) < pRe){
             if      (asp == Aspect::Pitch) rebuildTargetPool(asp, poolPitch);
             else if (asp == Aspect::Oct)   rebuildTargetPool(asp, poolOct);
             else                            rebuildTargetPool(asp, poolVSel);
-        }
+        }*/
+        // (rebuildTargetPool moved off-tick to serviceBackground())
         if      (asp == Aspect::Pitch) maybeMorph(poolPitch, slider);
         else if (asp == Aspect::Oct)   maybeMorph(poolOct,   slider);
         else                           maybeMorph(poolVSel,  slider);
@@ -635,7 +667,11 @@ void seq::nextStep()
 
     MIDI.sendNoteOn(midiPitch, midiVel, 1);      // new note
     ui::refresh();          // draw into the pixel buffer
-    strip.show();           // commit: interrupts off for ~0.4 ms
+    if (clock::usingExt) {
+        ui::commitAfterStepIfNeededExt();   // safe commit in ext clock mode
+    } else {
+        strip.show();                        // safe to block in internal mode
+    }
 
     hw::btnInstant.edge = false;    // prevents multiple hits per press
 }
