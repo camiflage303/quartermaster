@@ -151,7 +151,35 @@ void clock::init()
 }
 
 /* optional utility; safe default */
-bool clock::safeToBlockForLeds() { return true; }
+bool clock::safeToBlockForLeds() {
+    // Internal clock is fine.
+    if (!usingExt) return true;
+
+    // If we don't have a stable F8 period yet, be conservative but not frozen.
+    unsigned long per = f8IntervalUs;
+    if (per == 0) return false;
+
+    unsigned long now   = micros();
+    unsigned long since = now - lastF8Us;
+    if (since > per) since = per;               // guard if we're a bit late
+    unsigned long until = per - since;
+
+    // --- NeoPixel time estimate ---
+    // ~30us per LED @800kHz + ~80us reset; tune for your strip length.
+    const unsigned long leds     = 16;          // NUM_LEDS
+    const unsigned long showTime = leds * 30UL + 80UL;  // ≈ 560 µs for 16 LEDs
+
+    // Small safety pad to avoid racing the UART ISR.
+    const unsigned long pad = 150UL;            // µs
+
+    // Two safe zones:
+    //  1) Right after an F8 (UART quiet): small window
+    //  2) Any time we have enough time before the next F8 to finish show()
+    const bool justAfterF8   = (since <= 800UL);                 // ~0.8 ms
+    const bool enoughTimeNow = (until >= (showTime + pad));      // > ~0.7 ms
+
+    return justAfterF8 || enoughTimeNow;
+}
 
 /* tiny helpers */
 void clock::hardResetCounters()

@@ -201,7 +201,7 @@ void hw::scanInputs()
     {
         static uint8_t _prevLS = 0, _prevLE = 0;
         if (pots.loopStart != _prevLS || pots.loopEnd != _prevLE) {
-            seq::markLoopBoundsDirty();
+            //seq::markLoopBoundsDirty();
             _prevLS = pots.loopStart; _prevLE = pots.loopEnd;
         }
     }

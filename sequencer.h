@@ -10,7 +10,7 @@ namespace seq {
     void init();
     void nextStep();
     void forceStep(uint8_t step);   // 0-15
-    void regenerateAll(uint8_t probability);
+    void regenerateAll(uint8_t probability, bool respectLocks = true);
     void commitProspect();
     void rotateAllLeft();
     void rotateAllRight();

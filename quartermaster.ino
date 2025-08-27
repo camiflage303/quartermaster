@@ -24,17 +24,16 @@ void loop()
     while (MIDI.read()) { /* handlers will run here */ }
 
     // Do background (non-timing-critical) sequencer work *between* ticks
-    seq::serviceBackground();
+    //seq::serviceBackground();
 
-    if (hw::btnInstant.edge) {                         //   BTN_INST
-        seq::regenerateAll(hw::pots.instChance);       //   make 16 new prospect notes
-        seq::commitProspect();                         //   and commit at once
-        ui::refresh();   // redraw pixels to show the new pattern
-        if (!clock::usingExt) {                        // don't block during external sync
-            strip.show();
-        }        
+    if (hw::btnInstant.edge) {                         
+        seq::regenerateAll(hw::pots.instChance);
+        seq::commitProspect();
+        ui::refresh();
+        strip.show();
         hw::btnInstant.edge = false;
     }
+
 
     if (hw::btnCopy.edge) {                            //   BTN_COMMIT (global)
         seq::commitProspect();                         //   write the 16-step prospective layer to regular
@@ -83,6 +82,17 @@ void loop()
     }
 
     ui::refresh();
+   // main loop() – after ui::refresh():
+    static unsigned long lastCommitF8Us = 0;
+
+    if (clock::safeToBlockForLeds()) {
+        // Only one commit per F8 period to coalesce paints
+        if (clock::lastF8Us != lastCommitF8Us) {
+            ui::commitNow();                 // this calls strip.show() if ledsDirty
+            lastCommitF8Us = clock::lastF8Us;
+        }
+    }
+
     prevOn = on;
 
     //dbgPrint();
