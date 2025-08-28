@@ -8,9 +8,9 @@ namespace ui {
     void init();
     void refresh();
 
-    // Still exposed for compatibility; now just commits immediately if needed.
+    // Kept for compatibility; now just commits if pending.
     void commitAfterStepIfNeededExt();
 
-    // New: force an immediate LED commit right now if anything is dirty.
+    // Force an immediate LED commit right now if anything is dirty.
     void commitNow();
 }

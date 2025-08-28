@@ -16,6 +16,18 @@ static uint8_t  prevLoopHi      = 15;
 static uint8_t  prevVel[NUM_LEDS] = {0}; // 0=off,1=v1,2=v2,3=Lmark,4=Rmark
 static bool     ledsDirty       = false;
 
+/* throttle LED commits in external mode to avoid tick-edge stalls */
+static unsigned long lastCommitUs = 0;
+static inline void commitThrottled(){
+    if (!ledsDirty) return;
+    unsigned long now = micros();
+    if (!clock::usingExt || (now - lastCommitUs) > 2000) { // >= 2 ms
+        strip.show();
+        lastCommitUs = now;
+        ledsDirty = false;
+    }
+}
+
 /* quick helpers */
 inline void px(uint8_t i,uint8_t r,uint8_t g,uint8_t b){
     uint32_t nc = strip.Color(r,g,b);
@@ -31,7 +43,7 @@ constexpr RGB CLR_MARK_R    {  8,  0,  0};
 constexpr RGB CLR_PLAY_LOOP { 80, 80, 40};
 constexpr RGB CLR_PLAY_GEN  { 40, 40, 20};
 
-/* heat-map (velocity-based colour) */
+/* velocity heat-map */
 constexpr uint8_t MAX_BRIGHT = 127;
 static inline RGB wheel(uint8_t pos){
     uint8_t r,g,b;
@@ -110,11 +122,11 @@ static void paintStaticRegion()
     prevLoopHi = hi;
 }
 
-/* ───────── API ───────── */
 void ui::init(){
     strip.begin();
     strip.setBrightness(50);
     strip.show(); // clear
+    lastCommitUs = micros();
 }
 
 void ui::refresh()
@@ -128,7 +140,7 @@ void ui::refresh()
         paintStaticRegion();
         prevStep = 255;
         ledsDirty = true;
-        //if (ledsDirty) { strip.show(); ledsDirty = false; }
+        commitThrottled();
         prevOn = on;
         waitingForFirstStep = false;
         return;
@@ -140,7 +152,7 @@ void ui::refresh()
         paintStaticRegion();
         prevStep = 255;
         ledsDirty = true;
-        //if (ledsDirty) { strip.show(); ledsDirty = false; }
+        commitThrottled();
         prevOn = on;
         return;
     }
@@ -150,7 +162,7 @@ void ui::refresh()
         if (seq::stepNow() == stepAtOn) {
             paintStaticRegion();
             ledsDirty = true;
-            //if (ledsDirty) { strip.show(); ledsDirty = false; }
+            commitThrottled();
             return;
         }
         waitingForFirstStep = false;
@@ -183,20 +195,8 @@ void ui::refresh()
         paintStaticRegion();
         prevStep = 255;
         ledsDirty = true;
-        //if (ledsDirty) { strip.show(); ledsDirty = false; }
+        commitThrottled();
     }
-
-    static uint8_t lastStepPainted = 255;
-    bool ext = clock::usingExt;
-
-    /*if (needFull && ext) {
-        uint8_t step = seq::stepNow();
-        if (step == lastStepPainted) {
-            needFull = false; // coalesce until next step boundary
-        } else {
-            lastStepPainted = step;
-        }
-    }*/
 
     // Playhead / head highlight
     uint8_t step = seq::stepNow();
@@ -231,21 +231,20 @@ void ui::refresh()
 
         prevStep = step;
         ledsDirty = true;
+        commitThrottled();
     }
 
-    // Commit immediately (both internal and external)
-    //if (ledsDirty) { strip.show(); ledsDirty = false; }
+    // Final safety commit in case only small changes occurred
+    commitThrottled();
 }
 
 void ui::commitAfterStepIfNeededExt() {
-    // Now simply commits right away if something is pending.
-    //if (ledsDirty) { strip.show(); ledsDirty = false; }
+    commitThrottled();
 }
 
 void ui::commitNow(){
-    if (ledsDirty) {
-        strip.show();
-        ledsDirty = false;
-    }
+    if (!ledsDirty) return;
+    strip.show();
+    ledsDirty = false;
+    lastCommitUs = micros();
 }
-
