@@ -2,24 +2,21 @@
 #include <Arduino.h>
 
 namespace clock {
+  // Call once
+  void init();
 
-    // call once from setup()
-    void init();
+  // Call every loop()
+  void service();
 
-    // call each loop()  – handles both ext & int timing
-    void service();
+  // Control
+  void hardResetCounters();
+  void forceStop();
 
-    void hardResetCounters();
-    void forceStop();
+  // Exposed knobs (read/write)
+  extern volatile bool usingExt;  // true=follows external clock
+  extern uint16_t      bpm;       // internal BPM
 
-    // the app can read or set these (but doesn’t have to)
-    extern volatile bool usingExt;         // true = follow external clock
-    extern uint16_t      bpm;              // beats per minute (30-300)
-    extern uint8_t       pulsesPerStep;    // 24, 12, 6 … (PPQN ÷ divider)
-
-    // Optional utility (not used by default but safe to keep)
-    extern volatile unsigned long lastF8Us;
-    extern volatile unsigned long f8IntervalUs;  // low-pass filtered F8 tick interval
-
-    bool safeToBlockForLeds();        // true = ok to call strip.show() now
+  // Optional telemetry (for profiling)
+  extern volatile unsigned long lastF8Us;
+  extern volatile unsigned long f8IntervalUs;
 }

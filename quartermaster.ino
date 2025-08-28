@@ -85,13 +85,13 @@ void loop()
    // main loop() – after ui::refresh():
     static unsigned long lastCommitF8Us = 0;
 
-    if (clock::safeToBlockForLeds()) {
+    /*if (clock::safeToBlockForLeds()) {
         // Only one commit per F8 period to coalesce paints
         if (clock::lastF8Us != lastCommitF8Us) {
             ui::commitNow();                 // this calls strip.show() if ledsDirty
             lastCommitF8Us = clock::lastF8Us;
         }
-    }
+    }*/
 
     prevOn = on;
 
