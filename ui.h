@@ -1,8 +1,8 @@
 #pragma once
 #include <Arduino.h>
-#include <Adafruit_NeoPixel.h>
+#include <Adafruit_DotStar.h>
 
-extern Adafruit_NeoPixel strip;
+extern Adafruit_DotStar strip;
 
 namespace ui {
   void init();

@@ -17,9 +17,9 @@ namespace {
   volatile bool     extStepFlag  = false; // one-shot: "service a step now"
   volatile bool     transportRun = false;
 
-  // Internal clock
-  uint8_t      intTickCtr = 0;
-  unsigned long lastIntUs = 0;
+  // Internal clock state
+  uint8_t       intTickCtr = 0;
+  unsigned long lastIntUs  = 0;
 
   inline void flagStep() { extTickCtr = 0; extStepFlag = true; }
 }
@@ -27,7 +27,7 @@ namespace {
 // public
 volatile bool     clock::usingExt = false;
 uint16_t          clock::bpm      = 120;
-volatile unsigned long clock::lastF8Us = 0;
+volatile unsigned long clock::lastF8Us     = 0;
 volatile unsigned long clock::f8IntervalUs = 0;
 
 // MIDI ISR callbacks
@@ -45,9 +45,9 @@ static void isrClock()
     if (clock::usingExt) extStepFlag = true;
   }
 }
-static void isrStart()  { transportRun = true; extTickCtr = 0; if (clock::usingExt) extStepFlag = true; }
+static void isrStart()   { transportRun = true; extTickCtr = 0; if (clock::usingExt) extStepFlag = true; }
 static void isrContinue(){ transportRun = true; }
-static void isrStop()   { transportRun = false; extStepFlag = false; MIDI.sendControlChange(123,0,1); }
+static void isrStop()    { transportRun = false; extStepFlag = false; MIDI.sendControlChange(123,0,1); }
 
 void clock::init()
 {
@@ -67,6 +67,7 @@ void clock::hardResetCounters(){
   interrupts();
   lastIntUs = micros();
 }
+
 void clock::forceStop(){
   noInterrupts();
   transportRun = false;
@@ -93,10 +94,10 @@ void clock::service()
   }
 
   // Transport OFF ⇒ pause everything locally (don’t force RUN=TRUE here)
-  if (!on) { 
-    // local panel OFF: ensure we’re not stepping
+  if (!on) {
+    // ensure we’re not stepping
     noInterrupts(); extStepFlag = false; interrupts();
-    return; 
+    return;
   }
 
   if (usingExt) {
@@ -104,18 +105,18 @@ void clock::service()
     noInterrupts();
     // Only step when the external transport is actually running
     if (transportRun && extStepFlag) { extStepFlag = false; fire = true; }
-
     interrupts();
+
     if (fire) seq::nextStep();
     return;
   }
 
-  // Internal tick
+  // Internal clock
   unsigned long now = micros();
   const float usPerQuarter = 60.0f / bpm * 1e6f;
   const float usPerTick    = usPerQuarter / PPQN;
 
-  if (now - lastIntUs > 2 * usPerTick) lastIntUs = now; // saturate
+  if (now - lastIntUs > 2 * usPerTick) lastIntUs = now; // saturate drift
   if (now - lastIntUs >= usPerTick) {
     lastIntUs += usPerTick;
     MIDI.sendRealTime(midi::Clock);

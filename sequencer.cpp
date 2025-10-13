@@ -188,7 +188,6 @@ void seq::nextStep()
   MIDI.sendNoteOn(midiPitch, midiVel, 1);
   prevNote = (midiVel ? midiPitch : -1);
 
-  // 4) UI buffer update; commit policy lives in ui.cpp
+  // 4) UI update; ui::refresh() now flushes immediately if dirty
   ui::refresh();
-  ui::commitAfterStepIfNeededExt(); // ext: one commit per step; int: no-op
 }
