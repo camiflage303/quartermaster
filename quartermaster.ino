@@ -8,6 +8,7 @@ MIDI_CREATE_DEFAULT_INSTANCE();
 
 void setup(){
     Serial.begin(31250);
+    randomSeed(analogRead(A7));
     hw::initPins();
     hw::scanInputs();      // prime the first read
     seq::armReset();

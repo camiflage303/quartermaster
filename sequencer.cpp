@@ -169,25 +169,71 @@ void seq::nextStep()
   runAspect(Aspect::Oct,   hw::pots.deltaProb[2], genOct  );
   runAspect(Aspect::VSel,  hw::pots.deltaProb[3], genVSel );
 
+  /*
+  // DEBUG TEMP PRINTS ============================
+  Serial.print(F("STEP ")); Serial.print(curStep);
+  Serial.print(F("  D=")); Serial.print(hw::pots.density);
+  Serial.print(F("  Destr=")); Serial.print(hw::btnDestruct.level); 
+  Serial.print(F("/")); Serial.print(hw::pots.destructiveChance);
+  Serial.print(F("  VelPot=")); Serial.print(hw::pots.velocity);
+  Serial.print(F("  GateP=")); Serial.print(trVel.prospect[curStep]);
+  Serial.print(F("  PitchP=")); Serial.print(trPitch.prospect[curStep] & 7);
+  //Serial.print(F("  usingExt=")); Serial.print(clock::usingExt);
+  //Serial.print(F("  run=")); Serial.println(/* transport run? //true); // quick placeholder
+  //Serial.println(); 
+  // =============================================
+  */
+
+
   // 3) Build and send MIDI (No CC-123 here!)
+  // --- MIDI Pitch Calculation (includes clamping) ---
   static const uint8_t modes[7][8] = {
     {0,2,4,5,7,9,11,12},{0,2,3,5,7,9,10,12},{0,1,3,5,7,8,10,12},
     {0,2,4,6,7,9,11,12},{0,2,4,5,7,9,10,12},{0,2,3,5,7,8,10,12},
     {0,1,3,5,6,8,10,12}
   };
+
   uint8_t degree  = trPitch.prospect[curStep] & 0x07;
   uint8_t scale   = constrain(hw::pots.scale, 1, 7) - 1;
   int8_t  octDisp = int8_t(trOct.prospect[curStep]) - 1;
-  uint8_t midiPitch = hw::pots.root + modes[scale][degree] + octDisp * 12;
 
-  uint8_t baseVel = trVel.prospect[curStep] ? hw::pots.velocity : 0;
+  int pitchTmp = int(hw::pots.root) + int(modes[scale][degree]) + int(octDisp) * 12;
+  pitchTmp = constrain(pitchTmp, 0, 127);
+  uint8_t midiPitch = (uint8_t)pitchTmp;
+
+  // --- Velocity & Gate Handling ---
+  bool gateNow = (trVel.prospect[curStep] != 0);
+  uint8_t baseVel = gateNow ? hw::pots.velocity : 0;
   if (trAcc.prospect[curStep]) baseVel = hw::pots.accentVel;
   uint8_t midiVel = constrain(baseVel, 0, 127);
 
-  if (prevNote >= 0) MIDI.sendNoteOn((uint8_t)prevNote, 0, 1); // vel=0 off
-  MIDI.sendNoteOn(midiPitch, midiVel, 1);
-  prevNote = (midiVel ? midiPitch : -1);
+  // --- Smarter Note Handling (Fix A) ---
+  static int8_t prevPitch = -1;
+  static bool   prevGate  = false;
 
-  // 4) UI update; ui::refresh() now flushes immediately if dirty
-  ui::refresh();
+  // If gate is going low -> send proper NoteOff
+  if (!gateNow && prevGate && prevPitch >= 0) {
+    MIDI.sendNoteOff((uint8_t)prevPitch, 0, 1);
+    prevPitch = -1;
+  }
+
+  if (gateNow) {
+    if (prevPitch < 0) {
+      // Was off → turn on
+      MIDI.sendNoteOn(midiPitch, midiVel, 1);
+      prevPitch = midiPitch;
+    } else if (midiPitch != prevPitch) {
+      // Change pitch → off old, on new
+      MIDI.sendNoteOff((uint8_t)prevPitch, 0, 1);
+      MIDI.sendNoteOn(midiPitch, midiVel, 1);
+      prevPitch = midiPitch;
+    } else {
+      // Same pitch & gate stays high — legato (DO NOT retrigger unless you want to)
+      // Uncomment below if you DO want per-step retrigger:
+      MIDI.sendNoteOff((uint8_t)prevPitch, 0, 1);
+      MIDI.sendNoteOn(midiPitch, midiVel, 1);
+    }
+  }
+
+  prevGate = gateNow;
 }

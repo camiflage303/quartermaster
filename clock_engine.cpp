@@ -17,6 +17,9 @@ namespace {
   volatile bool     extStepFlag  = false; // one-shot: "service a step now"
   volatile bool     transportRun = false;
 
+  // queue next subdivision; 0 = no pending change
+  volatile uint8_t  nextPPSISR   = 0;
+
   // Internal clock state
   uint8_t       intTickCtr = 0;
   unsigned long lastIntUs  = 0;
@@ -42,11 +45,19 @@ static void isrClock()
 
   if (++extTickCtr >= pulsesPerStepISR) {
     extTickCtr = 0;
+
+    // adopt new subdivision exactly at boundary
+    if (nextPPSISR && nextPPSISR != pulsesPerStepISR) {
+      pulsesPerStepISR = nextPPSISR;
+      nextPPSISR = 0;
+    }
+
     if (clock::usingExt) extStepFlag = true;
   }
 }
-static void isrStart()   { transportRun = true; extTickCtr = 0; if (clock::usingExt) extStepFlag = true; }
-static void isrContinue(){ transportRun = true; }
+
+static void isrStart()    { transportRun = true; extTickCtr = 0; /* no step yet */ }
+static void isrContinue() { transportRun = true; /* no step yet */ }
 static void isrStop()    { transportRun = false; extStepFlag = false; MIDI.sendControlChange(123,0,1); }
 
 void clock::init()
@@ -82,16 +93,16 @@ void clock::service()
   bool on  = hw::btnOnOff.level;
   bpm      = hw::pots.bpm;
 
-  // pulses-per-step updates (atomic write)
-  static uint8_t prevPPS = 6;
+  // pulses-per-step updates: queue and apply at next step boundary
+  static uint8_t prevUiPPS = 6;
   uint8_t uiPPS = constrain(hw::pots.pulsesPerStep, 1, 96);
-  if (uiPPS != prevPPS) {
+  if (uiPPS != prevUiPPS) {
     noInterrupts();
-    pulsesPerStepISR = uiPPS;
-    extTickCtr = 0; intTickCtr = 0;
+    nextPPSISR = uiPPS;     // defer until boundary
     interrupts();
-    prevPPS = uiPPS;
+    prevUiPPS = uiPPS;
   }
+
 
   // Transport OFF ⇒ pause everything locally (don’t force RUN=TRUE here)
   if (!on) {
@@ -122,6 +133,15 @@ void clock::service()
     MIDI.sendRealTime(midi::Clock);
     if (++intTickCtr >= pulsesPerStepISR) {
       intTickCtr = 0;
+
+      // adopt new subdivision exactly at boundary
+      noInterrupts();
+      if (nextPPSISR && nextPPSISR != pulsesPerStepISR) {
+        pulsesPerStepISR = nextPPSISR;
+        nextPPSISR = 0;
+      }
+      interrupts();
+
       seq::nextStep();
     }
   }

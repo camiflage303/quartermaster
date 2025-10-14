@@ -109,7 +109,7 @@ static Input inputs[N_RAW_INPUTS] = {
   {2,4 ,false,-1,false,-1}, // IDX_DELTA_OCT
   {2,6 ,false,-1,false,-1}, // IDX_DELTA_ACC
   {2,8 ,true ,-1,false, 5}, // IDX_BTN_CYC_R  -> flash L6
-  {2,4 ,true ,-1,false,-1}, // IDX_BTN_RESET  -> *** FIXED to channel 4 on new PCB ***
+  {2,9 ,true ,-1,false,-1}, // IDX_BTN_RESET  -> *** FIXED to channel 4 on new PCB ***
   {2,10,true ,-1,false, 2}, // IDX_BTN_INST   -> flash L3
   {2,11,true ,-1,false, 1}, // IDX_BTN_NONDEST-> flash L2
   {2,14,false,-1,false,-1}, // IDX_INST_POT
