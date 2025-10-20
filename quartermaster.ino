@@ -1,8 +1,7 @@
 // --- main.ino (updated) -------------------------------------------------
-// Key changes:
-// 1) Pump MIDI first in loop() to keep callbacks timely.
-// 2) Handle deferred "All Notes Off" from clock_engine (pendingAllNotesOff).
-// 3) Keep a single UI refresh in the main loop (seq::nextStep() no longer calls ui::refresh()).
+// ========= USER SETTINGS =========
+#define QM_MIDI_CHANNEL 1   // ← set your global MIDI channel here (1..16)
+// =================================
 
 #include <MIDI.h>
 #include "hw_inputs.h"
@@ -12,15 +11,17 @@
 
 MIDI_CREATE_DEFAULT_INSTANCE();
 
-void setup(){
-    Serial.begin(31250);
-    randomSeed(analogRead(A7));
-    hw::initPins();
-    hw::scanInputs();      // prime the first read
-    seq::armReset();
-    clock::init();
-    seq::init();
-    ui::init();
+void setup() {
+  clock::midiChannel = (uint8_t)constrain(QM_MIDI_CHANNEL, 1, 16);  // ✅ authoritative channel
+
+  Serial.begin(31250);
+  randomSeed(analogRead(A7));
+  hw::initPins();
+  hw::scanInputs();      // prime the first read
+  seq::armReset();
+  clock::init();
+  seq::init();
+  ui::init();
 }
 
 void loop()
@@ -30,7 +31,7 @@ void loop()
 
     // If the clock engine requested an All Notes Off (e.g., on Stop), send it now.
     if (clock::pendingAllNotesOff) {
-        MIDI.sendControlChange(123, 0, 1);
+        MIDI.sendControlChange(123, 0, clock::midiChannel);
         // Clear the flag atomically
         noInterrupts();
         clock::pendingAllNotesOff = false;

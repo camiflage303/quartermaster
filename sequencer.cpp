@@ -11,6 +11,7 @@
 
 #include "sequencer.h"
 #include "hw_inputs.h"
+#include "clock_engine.h"
 #include "ui.h"
 #include <MIDI.h>
 
@@ -526,22 +527,22 @@ void seq::nextStep()
   static bool   prevGate  = false;
 
   if (!gateNow && prevGate && prevPitch >= 0) {
-    MIDI.sendNoteOff((uint8_t)prevPitch, 0, 1);
+    MIDI.sendNoteOff((uint8_t)prevPitch, 0, clock::midiChannel);
     prevPitch = -1;
   }
 
   if (gateNow) {
     if (prevPitch < 0) {
-      MIDI.sendNoteOn(midiPitch, midiVel, 1);
+      MIDI.sendNoteOn(midiPitch, midiVel, clock::midiChannel);
       prevPitch = midiPitch;
     } else if (midiPitch != prevPitch) {
-      MIDI.sendNoteOff((uint8_t)prevPitch, 0, 1);
-      MIDI.sendNoteOn(midiPitch, midiVel, 1);
+      MIDI.sendNoteOff((uint8_t)prevPitch, 0, clock::midiChannel);
+      MIDI.sendNoteOn(midiPitch, midiVel, clock::midiChannel);
       prevPitch = midiPitch;
     } else {
       // Retrigger same note each step (comment out next two lines for legato)
-      MIDI.sendNoteOff((uint8_t)prevPitch, 0, 1);
-      MIDI.sendNoteOn(midiPitch, midiVel, 1);
+      MIDI.sendNoteOff((uint8_t)prevPitch, 0, clock::midiChannel);
+      MIDI.sendNoteOn(midiPitch, midiVel, clock::midiChannel);
     }
   }
 

@@ -34,7 +34,24 @@ constexpr uint8_t LED_PINS[8] = {
 static uint8_t    ledTimer[8] = {0};
 
 /* UI PPS positions (locked divisors of 96 PPQN) */
-constexpr uint8_t kPpsLocked[] = {96,48,24,12,6};
+// Pulses-per-step locked values for musical divisions:
+constexpr uint8_t kPpsLocked[] = {
+  96, // Whole note
+  72, // Dotted half
+  48, // Half note
+  36, // Dotted quarter
+  24, // Quarter
+  16, // Quarter triplet
+  18, // Dotted eighth  <-- yes, dotted happens BEFORE standard eighth
+  12, // Eighth
+  8,  // Eighth triplet
+  9,  // Dotted 16th
+  6,  // 16th
+  4,  // 16th triplet
+  3,  // 32nd
+  2   // 32nd triplet
+};
+
 
 /* ───────────────── 2) Raw-input descriptor ────────────────────────── */
 struct Input {
@@ -221,12 +238,17 @@ void hw::scanInputs() {
   pots.accentChance      = map(pot(IDX_ACC_PROB_POT), 0,1023, 0,128);
 
   // Tempo & pulses-per-step selector
+  // ---- Tempo & pulses-per-step selector (fixed) ----
+  // ---- Tempo & pulses-per-step selector (fixed index mapping) ----
   pots.bpm = map(pot(IDX_TEMPO_POT), 0,1023, 3,303);
   {
-    uint8_t ix = map(pot(IDX_TEMPO_POT), 0,1024, 0,5);   // 0..5 → clamp to 0..4 later
-    if (ix > 4) ix = 4;
+    const uint8_t N = sizeof(kPpsLocked) / sizeof(kPpsLocked[0]);
+    uint8_t ix = map(pot(IDX_TEMPO_POT), 0, 1023, 0, (int)N - 1);
+    ix = constrain(ix, 0, N - 1);
     pots.pulsesPerStep = kPpsLocked[ix];
   }
+
+
 
   // Loop bounds 1..16
   pots.loopStart = map(pot(IDX_LOOP_START), 0,1024, 1,17);
