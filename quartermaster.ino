@@ -1,3 +1,9 @@
+// --- main.ino (updated) -------------------------------------------------
+// Key changes:
+// 1) Pump MIDI first in loop() to keep callbacks timely.
+// 2) Handle deferred "All Notes Off" from clock_engine (pendingAllNotesOff).
+// 3) Keep a single UI refresh in the main loop (seq::nextStep() no longer calls ui::refresh()).
+
 #include <MIDI.h>
 #include "hw_inputs.h"
 #include "clock_engine.h"
@@ -19,16 +25,26 @@ void setup(){
 
 void loop()
 {
-    hw::scanInputs();
-
-    // Drain all pending MIDI bytes this pass so callbacks stay timely
+    // --- 0) Pump MIDI first: drain all pending bytes so callbacks stay timely
     while (MIDI.read()) { /* handlers (F8/Start/Stop) run in callbacks */ }
 
-    // Immediate actions
+    // If the clock engine requested an All Notes Off (e.g., on Stop), send it now.
+    if (clock::pendingAllNotesOff) {
+        MIDI.sendControlChange(123, 0, 1);
+        // Clear the flag atomically
+        noInterrupts();
+        clock::pendingAllNotesOff = false;
+        interrupts();
+    }
+
+    // --- 1) Scan hardware (banked; cheap)
+    hw::scanInputs();
+
+    // --- 2) Immediate actions (no long work here)
     if (hw::btnInstant.edge) {
         seq::regenerateAll(hw::pots.instChance);
         seq::commitProspect();
-        ui::refresh();                 // immediate flush handled in ui.cpp
+        ui::refresh();                 // immediate flush handled in ui.cpp (rate limited there)
         hw::btnInstant.edge = false;
     }
 
@@ -52,6 +68,7 @@ void loop()
         hw::btnReset.edge = false;
     }
 
+    // --- 3) Transport ON/OFF handling
     static bool prevOn = false;
     bool on = hw::btnOnOff.level;
 
@@ -63,7 +80,7 @@ void loop()
 
     /* falling edge (ON → OFF) */
     if (!on &&  prevOn ) {
-        MIDI.sendControlChange(123, 0, 1);    // all notes off
+        MIDI.sendControlChange(123, 0, 1);    // local all notes off on user stop
         uint8_t target = hw::pots.loopEnd ? hw::pots.loopEnd - 1 : 15;
         seq::forceStep(target);               // park at last step
     }
@@ -73,7 +90,7 @@ void loop()
         clock::service();
     }
 
-    // Refresh UI every loop; it flushes immediately when dirty
+    // --- 4) Refresh UI once per loop (DotStar flush is rate-limited in ui.cpp)
     ui::refresh();
 
     prevOn = on;

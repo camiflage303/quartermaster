@@ -1,3 +1,14 @@
+// --- sequencer.cpp (use-next-in-pool playback, hard-lock invariant, gradual morph)
+// What’s new in this build:
+// • Pool playback always takes the *next* element (pre-increment) instead of the
+//   one under the cursor. This removes the audible “repeat the last one” feel
+//   at loop/Δ transitions without needing last-played guards.
+// • Pointer advance now sets aPtr := playIdx (since we pre-increment on read),
+//   so we still advance exactly one slot per gated step.
+// • Fully Δ-locked remains invariant: no pointer realign on loop changes; when
+//   entering hard lock, we freeze the current ACTIVE set (target := active).
+// • Easing off hard lock resumes gradual morphing; background rebuild ≤1/step.
+
 #include "sequencer.h"
 #include "hw_inputs.h"
 #include "ui.h"
@@ -23,10 +34,12 @@ namespace {
   uint8_t  curStep = 0;
   bool     resetPending = false;
 
-  // Latched loop bounds used for timing math
+  // Latched loop bounds for timing math
   uint8_t lsLat = 0, leLat = 15;
 
   // ---------- Small helpers ----------
+  static inline bool isHardLocked(uint8_t slider){ return slider >= kHardLockThreshold; }
+
   uint8_t advWithin(uint8_t s, uint8_t a, uint8_t b) {
     if (a == b) return a;
     if (a < b)  return (s < b) ? uint8_t(s+1) : a;
@@ -74,10 +87,11 @@ namespace {
   // ============================================================
   struct PoolElem { uint8_t step; uint8_t val; };  // preserve loop order
   struct AspectPool {
-    PoolElem active[16]; uint8_t aSize = 0; uint8_t aPtr = 0;   // playing set
-    PoolElem target[16]; uint8_t tSize = 0;                     // desired set
-    bool     morphActive = false;                                // converge needed
-    bool     usedThisStep = false;                               // pointer advance flag
+    PoolElem active[16]; uint8_t aSize = 0; uint8_t aPtr = 0;   // cursor (points to the element BEFORE the next-to-play)
+    PoolElem target[16]; uint8_t tSize = 0;
+    bool     morphActive = false;
+    bool     usedThisStep = false;
+    uint8_t  playIdxThisStep = 255;   // index actually used this step
   };
   static AspectPool poolPitch, poolOct, poolVSel;
 
@@ -107,13 +121,13 @@ namespace {
         if (P.tSize == 16) break;
       }
     }
-    P.morphActive = true;  // request convergence
+    P.morphActive = true;  // convergence requested (might be ignored by pRe==0)
   }
 
   // Perform at most one morph operation toward target; rate ~ pRe
   static void maybeMorph(AspectPool& P, uint8_t pRe /*0..127*/){
     if (!P.morphActive) return;
-    if (pRe == 0) return;              // “hard-lock” ⇒ no background morph
+    if (pRe == 0) return;              // hard-locked ⇒ no background morph
     if (random(128) >= pRe) return;
 
     // Prefer deletes of out-of-loop items first when shrinking
@@ -136,6 +150,7 @@ namespace {
           for (uint8_t j=P.aSize; j>pos; --j) P.active[j] = P.active[j-1];
           P.active[pos] = P.target[k];
           ++P.aSize;
+          // keep aPtr pointing to the element BEFORE the next to play:
           if (pos <= P.aPtr) ++P.aPtr;
           P.aPtr %= P.aSize;
           return;
@@ -152,7 +167,8 @@ namespace {
     P.morphActive = false;  // reached target
   }
 
-  // Align active pointer so first read matches current/next gated step
+  // Align pointer so that the *next* playback will match current/next gated step.
+  // Because we use "take NEXT", we align aPtr to the element BEFORE the one we want.
   static void alignPointerToCurrentOrNextGate(AspectPool& P){
     if (!P.aSize) { P.aPtr = 0; return; }
     uint8_t loopIdx[16], n; stepsInLoop(loopIdx, n);
@@ -162,22 +178,62 @@ namespace {
       uint8_t s = loopIdx[(startK + off) % n];
       if (trVel.regular[s]) {
         int8_t ix = findStep(P.active, P.aSize, s);
-        if (ix >= 0) { P.aPtr = (uint8_t)ix; return; }
+        if (ix >= 0) {
+          // We want NEXT read to produce 'ix', so set aPtr := ix-1 (mod aSize)
+          P.aPtr = (uint8_t)((ix + P.aSize - 1) % P.aSize);
+          return;
+        }
       }
     }
     P.aPtr %= P.aSize;
   }
 
+  // Take a value from a pool using "next element" semantics.
+  // aPtr points to the element BEFORE the one to play; we pre-increment.
+  static inline uint8_t takeFromPool(AspectPool& P, uint8_t fallbackVal){
+    if (!P.aSize) return fallbackVal;
+    uint8_t ix = (P.aSize == 1) ? 0 : (uint8_t)((P.aPtr + 1) % P.aSize);
+    P.usedThisStep = true;
+    P.playIdxThisStep = ix;
+    return P.active[ix].val;
+  }
+
+  // Slider-change handling:
+  // - 0 -> >0 : snap active := target + align once (legacy "lock-in" feel).
+  // - ENTERING hard-lock: FREEZE current active set (target := active),
+  //   DO NOT realign pointer, so content+phase freeze exactly.
+  // - leaving hard-lock : DO NOT snap; optional pointer align; gradual morph.
   static void onSliderChange(seq::Aspect asp, uint8_t oldS, uint8_t newS){
     AspectPool* P = (asp==seq::Aspect::Pitch ? &poolPitch
                      : asp==seq::Aspect::Oct ? &poolOct : &poolVSel);
-    rebuildTargetPool(asp, *P);
-    if (oldS == 0 && newS > 0) {
-      // Snap active := target for "no audible change" upon locking-in
+
+    const bool enteringHard = (oldS <  kHardLockThreshold) && (newS >= kHardLockThreshold);
+    const bool leavingHard  = (oldS >= kHardLockThreshold) && (newS <  kHardLockThreshold);
+    const bool lowRise      = (oldS == 0) && (newS > 0);
+
+    if (enteringHard) {
+      // Freeze: target := active; keep pointer/phase as-is; stop morphing.
+      P->tSize = P->aSize;
+      for (uint8_t i=0;i<P->aSize;i++) P->target[i] = P->active[i];
+      P->morphActive = false;
+      return;
+    }
+
+    if (lowRise) {
+      // First rise from 0: snap to current target built from REGULAR + gate
+      rebuildTargetPool(asp, *P);
       P->aSize = P->tSize;
       for (uint8_t i=0;i<P->tSize;i++) P->active[i] = P->target[i];
       P->morphActive = false;
       alignPointerToCurrentOrNextGate(*P);
+      return;
+    }
+
+    // Other cases: rebuild target and let gradual morph handle convergence.
+    rebuildTargetPool(asp, *P);
+    if (leavingHard) {
+      // Optionally align once for sane phase, but do not snap content.
+      if (P->aSize) alignPointerToCurrentOrNextGate(*P);
     }
   }
 
@@ -290,6 +346,16 @@ void seq::rotateAllRight(){ rotR(trPitch); rotR(trVel); rotR(trOct); rotR(trAcc)
 
 void seq::nextStep()
 {
+  // Snapshot current Δ sliders early so we can branch loop-change behavior
+  static uint8_t prevPitchS = 0, prevOctS = 0, prevVSelS = 0;
+  uint8_t sPitch = hw::pots.deltaProb[0];
+  uint8_t sOct   = hw::pots.deltaProb[2];
+  uint8_t sVSel  = hw::pots.deltaProb[3];
+
+  const bool hardPitch = isHardLocked(sPitch);
+  const bool hardOct   = isHardLocked(sOct);
+  const bool hardVSel  = isHardLocked(sVSel);
+
   // 0) latch loop bounds ONCE per step
   uint8_t liveLS = hw::pots.loopStart ? hw::pots.loopStart - 1 : 0;
   uint8_t liveLE = hw::pots.loopEnd   ? hw::pots.loopEnd   - 1 : 15;
@@ -302,50 +368,64 @@ void seq::nextStep()
   // Also align latched bounds when user moved them (at the step)
   if (liveLS != lsLat || liveLE != leLat) { lsLat = liveLS; leLat = liveLE; }
 
-  // 1b) Detect loop bound changes → refresh target pools (all)
+  // 1a) Slider-change detection → immediate pool updates/freeze/snap logic
+  if (sPitch != prevPitchS){ onSliderChange(Aspect::Pitch, prevPitchS, sPitch); prevPitchS = sPitch; }
+  if (sOct   != prevOctS)  { onSliderChange(Aspect::Oct,   prevOctS,   sOct  ); prevOctS   = sOct;   }
+  if (sVSel  != prevVSelS) { onSliderChange(Aspect::VSel,  prevVSelS,  sVSel ); prevVSelS  = sVSel;  }
+
+  // 1b) Detect loop bound changes → rebuild targets + conditional pointer align
   static uint8_t prevLS = 0, prevLE = 0;
   if (hw::pots.loopStart != prevLS || hw::pots.loopEnd != prevLE){
     rebuildTargetPool(Aspect::Pitch, poolPitch);
     rebuildTargetPool(Aspect::Oct,   poolOct);
     rebuildTargetPool(Aspect::VSel,  poolVSel);
+
+    // If an aspect is FULLY hard-locked, DO NOT realign its pointer.
+    if (!hardPitch && poolPitch.aSize) alignPointerToCurrentOrNextGate(poolPitch);
+    if (!hardOct   && poolOct  .aSize) alignPointerToCurrentOrNextGate(poolOct);
+    if (!hardVSel  && poolVSel .aSize) alignPointerToCurrentOrNextGate(poolVSel);
+
     prevLS = hw::pots.loopStart; prevLE = hw::pots.loopEnd;
   }
 
-  // 1c) Slider-change detection (all three) → immediate pool updates/snap
-  static uint8_t prevPitchS = 0, prevOctS = 0, prevVSelS = 0;
-  uint8_t sPitch = hw::pots.deltaProb[0];
-  uint8_t sOct   = hw::pots.deltaProb[2];
-  uint8_t sVSel  = hw::pots.deltaProb[3];
-  if (sPitch != prevPitchS){ onSliderChange(Aspect::Pitch, prevPitchS, sPitch); prevPitchS = sPitch; }
-  if (sOct   != prevOctS)  { onSliderChange(Aspect::Oct,   prevOctS,   sOct  ); prevOctS   = sOct;   }
-  if (sVSel  != prevVSelS) { onSliderChange(Aspect::VSel,  prevVSelS,  sVSel ); prevVSelS  = sVSel;  }
-
-  // 2) snapshot engine inputs once for this step (for morph maintenance)
+  // 2) snapshot engine inputs for this step (for morph maintenance)
   const auto tP = deltaTuning(sPitch);
   const auto tO = deltaTuning(sOct);
   const auto tV = deltaTuning(sVSel);
 
-  if (random(128) < tP.pRe) rebuildTargetPool(Aspect::Pitch, poolPitch);
-  if (random(128) < tO.pRe) rebuildTargetPool(Aspect::Oct,   poolOct  );
-  if (random(128) < tV.pRe) rebuildTargetPool(Aspect::VSel,  poolVSel );
+  // --- Throttle background target rebuilds to ONE per step -------------
+  bool didBgRebuild = false;
+  auto maybeBgRebuild = [&](seq::Aspect asp, AspectPool& P, uint8_t pRe){
+    if (didBgRebuild) return;
+    if (pRe && random(128) < pRe) {
+      rebuildTargetPool(asp, P);
+      didBgRebuild = true;
+    }
+  };
+  // Priority order: Pitch → Oct → VSel
+  maybeBgRebuild(Aspect::Pitch, poolPitch, tP.pRe);
+  maybeBgRebuild(Aspect::Oct,   poolOct,   tO.pRe);
+  maybeBgRebuild(Aspect::VSel,  poolVSel,  tV.pRe);
+  // ---------------------------------------------------------------------
 
   maybeMorph(poolPitch, tP.pRe);
   maybeMorph(poolOct,   tO.pRe);
   maybeMorph(poolVSel,  tV.pRe);
 
-  // Clear “used this step” flags
+  // Clear per-step flags
   poolPitch.usedThisStep = poolOct.usedThisStep = poolVSel.usedThisStep = false;
+  poolPitch.playIdxThisStep = poolOct.playIdxThisStep = poolVSel.playIdxThisStep = 255;
 
   // Helper: choose from pool or generator (by pUse)
   auto chooseFromPoolOrGen = [&](seq::Aspect a, uint8_t pUse)->uint8_t{
     if (a == seq::Aspect::Pitch){
-      if (poolPitch.aSize && random(128) < pUse) { poolPitch.usedThisStep = true; return poolPitch.active[poolPitch.aPtr].val; }
+      if (poolPitch.aSize && random(128) < pUse) return takeFromPool(poolPitch, genPitchRaw());
       return genPitchRaw();
     } else if (a == seq::Aspect::Oct){
-      if (poolOct.aSize   && random(128) < pUse) { poolOct.usedThisStep   = true; return poolOct.active[poolOct.aPtr].val; }
+      if (poolOct.aSize   && random(128) < pUse) return takeFromPool(poolOct,   genOctRaw());
       return genOctRaw();
     } else if (a == seq::Aspect::VSel){
-      if (poolVSel.aSize  && random(128) < pUse) { poolVSel.usedThisStep  = true; return poolVSel.active[poolVSel.aPtr].val; }
+      if (poolVSel.aSize  && random(128) < pUse) return takeFromPool(poolVSel,  genVSelRaw());
       return genVSelRaw();
     }
     return 0;
@@ -353,9 +433,9 @@ void seq::nextStep()
 
   // Force-from-pool (used when Δ-lock triggers for Pitch/Oct/VSel)
   auto forceFromPoolOrFallbackR = [&](seq::Aspect a, uint8_t& R)->uint8_t{
-    if (a == seq::Aspect::Pitch && poolPitch.aSize) { poolPitch.usedThisStep = true; return poolPitch.active[poolPitch.aPtr].val; }
-    if (a == seq::Aspect::Oct   && poolOct.aSize)   { poolOct.usedThisStep   = true; return poolOct.active[poolOct.aPtr].val; }
-    if (a == seq::Aspect::VSel  && poolVSel.aSize)  { poolVSel.usedThisStep  = true; return poolVSel.active[poolVSel.aPtr].val; }
+    if (a == seq::Aspect::Pitch && poolPitch.aSize) return takeFromPool(poolPitch, R);
+    if (a == seq::Aspect::Oct   && poolOct.aSize)   return takeFromPool(poolOct,   R);
+    if (a == seq::Aspect::VSel  && poolVSel.aSize)  return takeFromPool(poolVSel,  R);
     return R; // fallback to regular if pool empty
   };
 
@@ -408,11 +488,19 @@ void seq::nextStep()
   runAspect(Aspect::Oct,   hw::pots.deltaProb[2], genOctRaw  , tO.pUse, true );
   runAspect(Aspect::VSel,  hw::pots.deltaProb[3], genVSelRaw , tV.pUse, true );
 
-  // Advance pool pointers only on gated steps and only if that pool was used
+  // Advance pool pointers only on gated steps and only if that pool was used.
+  // Because we *played* index ix = (aPtr+1)%size, we now set aPtr := ix
+  // so that next step will naturally read the next element again.
   if (trVel.prospect[curStep]){
-    if (poolPitch.usedThisStep && poolPitch.aSize) poolPitch.aPtr = (poolPitch.aPtr + 1) % poolPitch.aSize;
-    if (poolOct  .usedThisStep && poolOct  .aSize) poolOct  .aPtr = (poolOct  .aPtr + 1) % poolOct  .aSize;
-    if (poolVSel .usedThisStep && poolVSel .aSize) poolVSel .aPtr = (poolVSel .aPtr + 1) % poolVSel .aSize;
+    if (poolPitch.usedThisStep && poolPitch.aSize) {
+      poolPitch.aPtr = poolPitch.playIdxThisStep;
+    }
+    if (poolOct.usedThisStep && poolOct.aSize) {
+      poolOct.aPtr = poolOct.playIdxThisStep;
+    }
+    if (poolVSel.usedThisStep && poolVSel.aSize) {
+      poolVSel.aPtr = poolVSel.playIdxThisStep;
+    }
   }
 
   // -------- MIDI build & send (clamped, proper NoteOff, per-step retrigger) --------
@@ -459,6 +547,5 @@ void seq::nextStep()
 
   prevGate = gateNow;
 
-  // 4) UI update
-  ui::refresh();
+  // NOTE: UI refresh is handled exclusively in the main loop.
 }

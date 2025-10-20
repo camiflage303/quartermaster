@@ -1,7 +1,19 @@
+// --- ui.cpp (updated) ------------------------------------------------------
+// Key changes:
+// - Added rate-limited LED flushes (DotStar .show()) while following ext MIDI.
+// - Skips one flush immediately after a sequencer step (reduces clock starvation).
+// - No UI work happens inside seq::nextStep(); main loop calls ui::refresh().
+//
+// Requires clock_engine.h to expose:
+//   extern volatile bool usingExt;
+//   extern volatile bool stepJustFired;
+
 #include "ui.h"
 #include "sequencer.h"
 #include "hw_inputs.h"
+#include "clock_engine.h"   // <-- for usingExt + stepJustFired
 #include <Adafruit_DotStar.h>
+#include <Arduino.h>
 
 constexpr uint8_t NUM_LEDS = 16;
 
@@ -13,6 +25,10 @@ static uint8_t prevStep = 255;
 static uint8_t prevLoopLo = 0, prevLoopHi = 15;
 static uint8_t prevType[NUM_LEDS] = {0};
 static bool    ledsDirty = false;
+
+// Flush governor (to avoid starving MIDI.read())
+static uint32_t lastFlushUs = 0;
+static constexpr uint32_t kMinFlushIntervalUs = 2000;  // 2 ms ≈ safe gap between F8 bursts
 
 // ---------- Small helpers ----------
 inline void px(uint8_t logicalIndex, uint8_t r, uint8_t g, uint8_t b) {
@@ -88,11 +104,34 @@ static void paintStatic() {
   prevLoopLo = lo; prevLoopHi = hi;
 }
 
+// Decide whether to flush the LED buffer now; rate-limit under external clock
+static inline void maybeFlush() {
+  if (!ledsDirty) return;
+
+  // Skip one flush immediately after a step while slaved, to avoid coinciding
+  // with the tightest timing moment (F8 boundary + nextStep()).
+  if (clock::usingExt) {
+    bool skip = false;
+    noInterrupts();
+    if (clock::stepJustFired) { skip = true; clock::stepJustFired = false; }
+    interrupts();
+    if (skip) return;
+
+    uint32_t now = micros();
+    if (lastFlushUs != 0 && (uint32_t)(now - lastFlushUs) < kMinFlushIntervalUs) return;
+    lastFlushUs = now;
+  }
+
+  strip.show();
+  ledsDirty = false;
+}
+
 // ---------- Public API ----------
 void ui::init() {
   strip.begin();
   strip.setBrightness(50);
   strip.show();
+  lastFlushUs = micros();
 }
 
 void ui::refresh() {
@@ -102,7 +141,7 @@ void ui::refresh() {
     paintStatic();
     prevStep = 255;
     ledsDirty = true;
-    if (ledsDirty) { strip.show(); ledsDirty = false; }
+    maybeFlush();
     return;
   }
 
@@ -154,6 +193,6 @@ void ui::refresh() {
     ledsDirty = true;
   }
 
-  // Immediate flush with DotStar
-  if (ledsDirty) { strip.show(); ledsDirty = false; }
+  // Flush with DotStar (rate-limited under external clock)
+  maybeFlush();
 }

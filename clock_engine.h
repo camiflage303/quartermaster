@@ -1,3 +1,4 @@
+// ---------------- clock_engine.h (updated) ---------------------------------
 #pragma once
 #include <Arduino.h>
 
@@ -19,4 +20,8 @@ namespace clock {
   // Optional telemetry (for profiling)
   extern volatile unsigned long lastF8Us;      // micros() timestamp of last F8
   extern volatile unsigned long f8IntervalUs;  // delta between consecutive F8s
+
+  // NEW: UI/loop coordination flags
+  extern volatile bool stepJustFired;      // set true right after seq::nextStep(); UI may clear it
+  extern volatile bool pendingAllNotesOff; // set on MIDI Stop; main loop sends CC123 and clears
 }

@@ -1,3 +1,4 @@
+// ---------------- clock_engine.cpp (updated) -------------------------------
 #include "clock_engine.h"
 #include "hw_inputs.h"
 #include "sequencer.h"
@@ -16,7 +17,7 @@ namespace {
   // 1 = step on the first clock AFTER the boundary.
   constexpr uint8_t kExtPhaseTicks = 1;
 
-  // ---------------- Shared with ISR ----------------
+  // ---------------- Shared with “ISR” callbacks (MIDI.read-driven) --------
   volatile uint8_t  pulsesPerStepISR = 6; // PPQN / divider (e.g. 24,12,6,...)
   volatile uint8_t  extTickCtr   = 0;     // ticks within step (0..pulsesPerStepISR-1)
   volatile bool     extStepFlag  = false; // one-shot: "service a step now"
@@ -43,7 +44,11 @@ uint16_t          clock::bpm      = 120;
 volatile unsigned long clock::lastF8Us     = 0;
 volatile unsigned long clock::f8IntervalUs = 0;
 
-// MIDI ISR callbacks
+// NEW: public flags
+volatile bool clock::stepJustFired      = false;
+volatile bool clock::pendingAllNotesOff = false;
+
+// MIDI “ISR” callbacks (invoked from MIDI.read())
 static void isrClock()
 {
   if (!transportRun) return;
@@ -107,11 +112,12 @@ static void isrContinue()
 
 static void isrStop()
 {
-  transportRun  = false;
-  extStepFlag   = false;
-  extPhaseArmed = false;
-  extStartKick  = false;
-  MIDI.sendControlChange(123,0,1); // All Notes Off
+  // Defer any MIDI sends to main loop to avoid starving the RX path.
+  transportRun        = false;
+  extStepFlag         = false;
+  extPhaseArmed       = false;
+  extStartKick        = false;
+  clock::pendingAllNotesOff = true;   // main loop will send CC123
 }
 
 void clock::init()
@@ -182,11 +188,13 @@ void clock::service()
     if (fireStart) {
       seq::armReset();      // start loop at current LS/LE
       seq::nextStep();      // fire first step immediately
+      stepJustFired = true; // let UI defer a flush this loop turn
       return;               // wait for the scheduled next step (full interval later)
     }
 
     if (fireStep) {
       seq::nextStep();
+      stepJustFired = true;
     }
     return;
   }
@@ -212,6 +220,7 @@ void clock::service()
       interrupts();
 
       seq::nextStep();
+      stepJustFired = true;
     }
   }
 }
