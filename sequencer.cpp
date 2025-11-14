@@ -8,6 +8,8 @@
 // • Fully Δ-locked remains invariant: no pointer realign on loop changes; when
 //   entering hard lock, we freeze the current ACTIVE set (target := active).
 // • Easing off hard lock resumes gradual morphing; background rebuild ≤1/step.
+// • NEW: loop-bound-change pool rebuild + pointer align is *skipped* while
+//   using external clock to keep the external step path light.
 
 #include "sequencer.h"
 #include "hw_inputs.h"
@@ -375,8 +377,13 @@ void seq::nextStep()
   if (sVSel  != prevVSelS) { onSliderChange(Aspect::VSel,  prevVSelS,  sVSel ); prevVSelS  = sVSel;  }
 
   // 1b) Detect loop bound changes → rebuild targets + conditional pointer align
+  // IMPORTANT: to keep external-clock timing tight, we only do this heavier
+  // rebuild/alignment work while using the *internal* clock. Under external
+  // sync, pools will gradually converge via background morph instead of
+  // forcing a rebuild+align exactly on the step boundary.
   static uint8_t prevLS = 0, prevLE = 0;
-  if (hw::pots.loopStart != prevLS || hw::pots.loopEnd != prevLE){
+  if (!clock::usingExt &&
+      (hw::pots.loopStart != prevLS || hw::pots.loopEnd != prevLE)){
     rebuildTargetPool(Aspect::Pitch, poolPitch);
     rebuildTargetPool(Aspect::Oct,   poolOct);
     rebuildTargetPool(Aspect::VSel,  poolVSel);
