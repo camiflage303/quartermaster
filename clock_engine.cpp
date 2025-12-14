@@ -55,13 +55,12 @@ uint16_t                clock::bpm      = 120;
 volatile unsigned long  clock::lastF8Us     = 0;
 volatile unsigned long  clock::f8IntervalUs = 0;
 
-// NOTE: midiChannel is deliberately NOT initialized here.
-// Set it in your .ino (see template below).
+// Set in main.ino
 uint8_t clock::midiChannel;
 
 bool    clock::quantizeDivChangeToGrid  = true;
 bool    clock::quantizeDivChangeToStart = false;
-uint8_t clock::beatsPerBar              = 4;   // (unused in this file, reserved)
+uint8_t clock::beatsPerBar              = 4;
 
 volatile bool clock::stepJustFired      = false;
 volatile bool clock::pendingAllNotesOff = false;
@@ -122,9 +121,9 @@ static void isrClock()
   // If using external clock, handle the phase-delayed step flagging
   if (clock::usingExt && extPhaseArmed) {
     if (extPhaseWait > 0) {
-      --extPhaseWait;                  // wait N clocks after boundary
+      --extPhaseWait;
     } else {
-      extStepFlag   = true;            // fire exactly once
+      extStepFlag   = true;
       extPhaseArmed = false;
     }
   }
@@ -147,17 +146,16 @@ static void isrStart()
 
   // Schedule NEXT step for a full subdivision after start, plus phase.
   uint8_t phase = (kExtPhaseTicks < pulsesPerStepISR) ? kExtPhaseTicks : 0;
-  extPhaseWait  = (uint8_t)((pulsesPerStepISR + phase) % 255); // wait a full step
+  extPhaseWait  = (uint8_t)((pulsesPerStepISR + phase) % 255);
   extPhaseArmed = true;
 
-  // Ask main loop to emit an immediate step (keeps first beat tight)
+  // Ask main loop to emit an immediate step
   extStartKick = true;
 }
 
 static void isrContinue()
 {
   transportRun = true;
-  // Do not force a boundary/phase jump here; most masters resume mid-cycle.
 }
 
 static void isrStop()
@@ -208,7 +206,6 @@ void clock::forceStop(){
   extStartKick  = false;
   interrupts();
 
-  // Also request All Notes Off in main loop
   pendingAllNotesOff = true;
 }
 
@@ -219,34 +216,48 @@ void clock::service()
   bool on  = hw::btnOnOff.level;
   bpm      = hw::pots.bpm;
 
-  // pulses-per-step from the UI
+  // 0a) Master transport (send Start/Stop) ONLY when internal master
+  static bool prevOn = false;
+  if (!usingExt) {
+    if (on && !prevOn) {
+      MIDI.sendRealTime(midi::Start);
+      // reset internal clock phase for tight start
+      intTickCtr = 0;
+      lastIntUs = micros();
+      transportRun = true;
+    }
+    if (!on && prevOn) {
+      MIDI.sendRealTime(midi::Stop);
+      transportRun = false;
+      pendingAllNotesOff = true;
+    }
+  }
+  prevOn = on;
+
+  // pulses-per-step from the UI (note division selector)
   static uint8_t prevUiPPS = 6;
-  uint8_t uiPPS = (uint8_t)constrain(hw::pots.pulsesPerStep, 1, 96); // sanity clamp
+  uint8_t uiPPS = (uint8_t)constrain(hw::pots.pulsesPerStep, 1, 96);
 
   auto isTripletPPS = [](uint8_t p)->bool {
-    // Triplet family we support: 16 (quarter T), 8 (eighth T), 4 (16th T), 2 (32nd T)
     return (p == 16) || (p == 8) || (p == 4) || (p == 2);
   };
 
   if (uiPPS != prevUiPPS) {
     noInterrupts();
-    if (usingExt && quantizeDivChangeToGrid) {
-      // Choose realm by destination PPS
+    if (usingExt && clock::quantizeDivChangeToGrid) {
       const bool toTrip = isTripletPPS(uiPPS);
       queuedPPSOnGrid = uiPPS;
       queuedGridKind  = toTrip ? GRID_TRIPLET : GRID_SIXTEENTH;
 
-      // Cancel other queues to avoid interference
       queuedPPSOnStart = 0;
       nextPPSISR       = 0;
-    } else if (usingExt && quantizeDivChangeToStart) {
-      // Fallback: apply at next MIDI Start
+    } else if (usingExt && clock::quantizeDivChangeToStart) {
       queuedPPSOnStart = uiPPS;
       nextPPSISR       = 0;
       queuedPPSOnGrid  = 0;
       queuedGridKind   = GRID_NONE;
     } else {
-      // Immediate (but boundary-safe) change: apply at the next step boundary (internal or ext w/o quantize)
+      // Internal master, or external without quantize: apply at next boundary
       nextPPSISR       = uiPPS;
       queuedPPSOnStart = 0;
       queuedPPSOnGrid  = 0;
@@ -266,6 +277,7 @@ void clock::service()
     return;
   }
 
+  // ---------------- External clock path ----------------
   if (usingExt) {
     bool fireStart = false;
     bool fireStep  = false;
@@ -276,10 +288,10 @@ void clock::service()
     interrupts();
 
     if (fireStart) {
-      seq::armReset();      // start loop at current LS/LE
-      seq::nextStep();      // immediate first step to stay tight to Start
+      seq::armReset();
+      seq::nextStep();
       stepJustFired = true;
-      return;               // next scheduled step will occur one full interval later
+      return;
     }
 
     if (fireStep) {
@@ -294,15 +306,15 @@ void clock::service()
   const float usPerQuarter = 60.0f / bpm * 1e6f;
   const float usPerTick    = usPerQuarter / PPQN;
 
-  if (now - lastIntUs > 2 * usPerTick) lastIntUs = now; // saturate drift
+  if (now - lastIntUs > 2 * usPerTick) lastIntUs = now;
   if (now - lastIntUs >= usPerTick) {
     lastIntUs += usPerTick;
     MIDI.sendRealTime(midi::Clock);
 
+    // Apply queued PPS change exactly at boundary
     if (++intTickCtr >= pulsesPerStepISR) {
       intTickCtr = 0;
 
-      // adopt new subdivision exactly at boundary
       noInterrupts();
       if (nextPPSISR && nextPPSISR != pulsesPerStepISR) {
         pulsesPerStepISR = nextPPSISR;

@@ -10,6 +10,12 @@
 // • Easing off hard lock resumes gradual morphing; background rebuild ≤1/step.
 // • NEW: loop-bound-change pool rebuild + pointer align is *skipped* while
 //   using external clock to keep the external step path light.
+//
+// Δ curve patch (this version):
+// • "Mega curve" on Δ so midpoint (~63) already behaves like ~90% hold.
+// • From 63→127, changes are tiny near the top (micro-control).
+// • From 63→0, it drops from ~90% down to 0% across the lower half.
+// • Engines/pool/loop morph behavior remains as in your original design.
 
 #include "sequencer.h"
 #include "hw_inputs.h"
@@ -29,7 +35,9 @@ namespace {
   constexpr uint8_t  kHardLockThreshold = 125; // Δ >= 125: pUse=127, pRe=0
   constexpr uint8_t  kSoftLockStart     = 121; // 121..124: pUse=127, pRe=1
   constexpr uint8_t  kSoftLock_pRe      = 1;
-  constexpr uint8_t  kRecurveShift      = 0;   // keep linear pRe
+
+  // Midpoint “hold” target: 90% of 127 ≈ 114
+  constexpr uint8_t  kMidHoldProb       = 114;
 
   struct Track { uint8_t regular[kSteps]={0}; uint8_t prospect[kSteps]={0}; };
   Track trPitch, trVel, trOct, trAcc;   // trAcc = VSel (0=V1, 1=V2)
@@ -260,15 +268,53 @@ namespace {
     return (random(128) < hw::pots.accentChance);
   }
 
+  // ---------- Mega-curve helpers (0..127 → 0..127) ----------
+  // Very steep ease-in (x^4) in 7-bit space
+  static inline uint8_t easeIn4_u7(uint8_t x){
+    uint16_t y = x;
+    y = (y * y + 64) >> 7;   // x^2
+    y = (y * y + 64) >> 7;   // x^4
+    return (uint8_t)y;
+  }
+
+  // Piecewise mega curve:
+  // - s=0 -> 0
+  // - s=63 -> pMid (e.g., 114 for 90%)
+  // - s=127 -> 127
+  // Steep in both halves: gives micro-control near the top.
+  static inline uint8_t megaCurveHold(uint8_t s, uint8_t pMid){
+    constexpr uint8_t MID = 63;
+    if (s == 0)   return 0;
+    if (s >= 127) return 127;
+
+    if (s <= MID){
+      // 0..63 -> 0..127, steep curve, then scale to 0..pMid
+      uint16_t x = (uint16_t)s * 127 / MID;     // 0..127
+      uint8_t  y = easeIn4_u7((uint8_t)x);
+      return (uint8_t)((uint16_t)y * pMid / 127);
+    } else {
+      // 64..127 -> 0..127, steep curve, then scale pMid..127
+      uint16_t t = (uint16_t)(s - MID) * 127 / (127 - MID); // 0..127
+      uint8_t  y = easeIn4_u7((uint8_t)t);
+      return (uint8_t)(pMid + (uint16_t)y * (127 - pMid) / 127);
+    }
+  }
+
   // Map Δ slider to probabilities
   struct DeltaTuning { uint8_t pUse; uint8_t pRe; };
+
   static inline DeltaTuning deltaTuning(uint8_t slider /*0..127*/){
-    if (slider >= kHardLockThreshold) { return {127, 0}; }           // hard band
-    if (slider >= kSoftLockStart)     { return {127, kSoftLock_pRe}; } // soft band
-    uint8_t pUse   = slider;                    // 0..127
-    uint8_t baseRe = (uint8_t)(127 - slider);   // 127..0
-    uint8_t pRe    = baseRe >> kRecurveShift;   // optional easing
+    if (slider >= kHardLockThreshold) { return {127, 0}; }              // hard band
+    if (slider >= kSoftLockStart)     { return {127, kSoftLock_pRe}; }  // soft band
+
+    // Pool use: mega-curve so midpoint (~63) is already ~90%
+    uint8_t pUse = megaCurveHold(slider, kMidHoldProb);
+
+    // Morph rate: inverse + steep so high Δ converges VERY slowly
+    uint8_t inv = 127 - slider;
+    uint8_t pRe = easeIn4_u7(inv);
     if (pRe == 0) pRe = 1;
+
     return {pUse, pRe};
   }
 }
@@ -490,11 +536,17 @@ void seq::nextStep()
     P = R;
   };
 
+  // Mega-curve lock probability so midpoint feels ~90% held.
+  uint8_t lockPitch = megaCurveHold(hw::pots.deltaProb[0], kMidHoldProb);
+  uint8_t lockVel   = megaCurveHold(hw::pots.deltaProb[1], kMidHoldProb);
+  uint8_t lockOct   = megaCurveHold(hw::pots.deltaProb[2], kMidHoldProb);
+  uint8_t lockVSel  = megaCurveHold(hw::pots.deltaProb[3], kMidHoldProb);
+
   // Run aspects in order
-  runAspect(Aspect::Pitch, hw::pots.deltaProb[0], genPitchRaw, tP.pUse, true );
-  runAspect(Aspect::Vel,   hw::pots.deltaProb[1], genGateRaw , 0      , false);
-  runAspect(Aspect::Oct,   hw::pots.deltaProb[2], genOctRaw  , tO.pUse, true );
-  runAspect(Aspect::VSel,  hw::pots.deltaProb[3], genVSelRaw , tV.pUse, true );
+  runAspect(Aspect::Pitch, lockPitch, genPitchRaw, tP.pUse, true );
+  runAspect(Aspect::Vel,   lockVel,   genGateRaw , 0      , false);
+  runAspect(Aspect::Oct,   lockOct,   genOctRaw  , tO.pUse, true );
+  runAspect(Aspect::VSel,  lockVSel,  genVSelRaw , tV.pUse, true );
 
   // Advance pool pointers only on gated steps and only if that pool was used.
   // Because we *played* index ix = (aPtr+1)%size, we now set aPtr := ix
