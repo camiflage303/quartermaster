@@ -36,20 +36,10 @@ static uint8_t    ledTimer[8] = {0};
 /* UI PPS positions (locked divisors of 96 PPQN) */
 // Pulses-per-step locked values for musical divisions:
 constexpr uint8_t kPpsLocked[] = {
-  96, // Whole note
-  72, // Dotted half
   48, // Half note
-  36, // Dotted quarter
-  24, // Quarter
-  16, // Quarter triplet
-  18, // Dotted eighth  <-- yes, dotted happens BEFORE standard eighth
-  12, // Eighth
-  8,  // Eighth triplet
-  9,  // Dotted 16th
-  6,  // 16th
-  4,  // 16th triplet
-  3,  // 32nd
-  2   // 32nd triplet
+  24, // Quarter note
+  12, // Eighth note
+  6,  // 16th note
 };
 
 
@@ -238,14 +228,22 @@ void hw::scanInputs() {
   pots.accentChance      = map(pot(IDX_ACC_PROB_POT), 0,1023, 0,128);
 
   // Tempo & pulses-per-step selector
-  // ---- Tempo & pulses-per-step selector (fixed) ----
-  // ---- Tempo & pulses-per-step selector (fixed index mapping) ----
   pots.bpm = map(pot(IDX_TEMPO_POT), 0,1023, 3,303);
   {
-    const uint8_t N = sizeof(kPpsLocked) / sizeof(kPpsLocked[0]);
-    uint8_t ix = map(pot(IDX_TEMPO_POT), 0, 1023, 0, (int)N - 1);
-    ix = constrain(ix, 0, N - 1);
-    pots.pulsesPerStep = kPpsLocked[ix];
+    const uint8_t  N   = sizeof(kPpsLocked) / sizeof(kPpsLocked[0]);
+    const uint16_t raw = (uint16_t)pot(IDX_TEMPO_POT);
+    static uint8_t prevIx = 0;
+    uint8_t newIx = constrain((uint8_t)(raw * N / 1024), 0, N - 1);
+    // Hysteresis: each zone is 256 counts wide; require 25-count margin inside
+    // the new zone before accepting a division change. This prevents pot wobble
+    // near a boundary from causing spurious phase resets against external clock.
+    if (newIx != prevIx) {
+      uint16_t zoneLo = (uint16_t)newIx * 256;
+      uint16_t zoneHi = zoneLo + 255;
+      if (raw >= zoneLo + 25 && raw <= zoneHi - 25)
+        prevIx = newIx;
+    }
+    pots.pulsesPerStep = kPpsLocked[prevIx];
   }
 
 
@@ -253,15 +251,6 @@ void hw::scanInputs() {
   // Loop bounds 1..16
   pots.loopStart = map(pot(IDX_LOOP_START), 0,1024, 1,17);
   pots.loopEnd   = map(pot(IDX_LOOP_END  ), 0,1024, 1,17);
-
-  // Optionally notify sequencer if you want off-tick rebuilds
-  {
-    static uint8_t _prevLS = 0, _prevLE = 0;
-    if (pots.loopStart != _prevLS || pots.loopEnd != _prevLE) {
-      // seq::markLoopBoundsDirty();   // keep commented unless implemented
-      _prevLS = pots.loopStart; _prevLE = pots.loopEnd;
-    }
-  }
 
   // Musical pots
   pots.root     = map(pot(IDX_ROOT_POT   ), 0,1023, 12,108);

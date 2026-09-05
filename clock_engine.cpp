@@ -18,7 +18,7 @@ namespace {
   // ---------------- Shared with ISR ----------------
   volatile uint8_t  pulsesPerStepISR = 6; // clocks per sequencer step (24/4=6 → 16ths)
   volatile uint8_t  extTickCtr   = 0;     // ticks within current step (0..pulsesPerStepISR-1)
-  volatile bool     extStepFlag  = false; // one-shot: "service a step now"
+  volatile uint8_t  extStepFlag  = 0;     // step counter: incremented by ISR, decremented by service()
   volatile bool     transportRun = false;
 
   // Phase-delay state: arm at boundary, count down ticks, then raise step flag once.
@@ -46,7 +46,8 @@ namespace {
 
   // Internal clock state
   uint8_t       intTickCtr = 0;
-  unsigned long lastIntUs  = 0;
+  unsigned long lastIntUs  = 0;   // whole microseconds (stays integer — precise, wraps correctly)
+  float         fracCarry  = 0.0f; // sub-microsecond remainder carried between ticks
 }
 
 // ---------- public state ----------
@@ -123,7 +124,7 @@ static void isrClock()
     if (extPhaseWait > 0) {
       --extPhaseWait;
     } else {
-      extStepFlag   = true;
+      if (extStepFlag < 4) ++extStepFlag;
       extPhaseArmed = false;
     }
   }
@@ -161,7 +162,7 @@ static void isrContinue()
 static void isrStop()
 {
   transportRun  = false;
-  extStepFlag   = false;
+  extStepFlag   = 0;
   extPhaseArmed = false;
   extStartKick  = false;
 
@@ -177,13 +178,14 @@ void clock::init()
   MIDI.setHandleContinue(isrContinue);
   MIDI.setHandleStop    (isrStop);
   MIDI.begin(MIDI_CHANNEL_OMNI);
-  lastIntUs = micros();
+  MIDI.turnThruOff();
+  lastIntUs = micros(); fracCarry = 0.0f;
 }
 
 void clock::hardResetCounters(){
   noInterrupts();
   extTickCtr    = 0;
-  extStepFlag   = false;
+  extStepFlag   = 0;
   intTickCtr    = 0;
   extPhaseWait  = 0;
   extPhaseArmed = false;
@@ -195,13 +197,13 @@ void clock::hardResetCounters(){
   f8Mod6 = 0;
   f8Mod8 = 0;
   interrupts();
-  lastIntUs = micros();
+  lastIntUs = micros(); fracCarry = 0.0f;
 }
 
 void clock::forceStop(){
   noInterrupts();
   transportRun  = false;
-  extStepFlag   = false;
+  extStepFlag   = 0;
   extPhaseArmed = false;
   extStartKick  = false;
   interrupts();
@@ -212,9 +214,15 @@ void clock::forceStop(){
 void clock::service()
 {
   // 0) snapshot UI knobs cheaply
+  static bool prevUsingExt = false;
   usingExt = hw::btnExtMidi.level;
   bool on  = hw::btnOnOff.level;
   bpm      = hw::pots.bpm;
+
+  // Reset ISR state cleanly when switching into external clock mode so we
+  // don't inherit a stale phase offset from internal mode.
+  if (usingExt && !prevUsingExt) hardResetCounters();
+  prevUsingExt = usingExt;
 
   // 0a) Master transport (send Start/Stop) ONLY when internal master
   static bool prevOn = false;
@@ -223,7 +231,7 @@ void clock::service()
       MIDI.sendRealTime(midi::Start);
       // reset internal clock phase for tight start
       intTickCtr = 0;
-      lastIntUs = micros();
+      lastIntUs = micros(); fracCarry = 0.0f;
       transportRun = true;
     }
     if (!on && prevOn) {
@@ -270,7 +278,7 @@ void clock::service()
   // Transport OFF ⇒ pause everything locally
   if (!on) {
     noInterrupts();
-    extStepFlag   = false;
+    extStepFlag   = 0;
     extPhaseArmed = false;
     extStartKick  = false;
     interrupts();
@@ -284,7 +292,7 @@ void clock::service()
 
     noInterrupts();
     if (extStartKick) { extStartKick = false; fireStart = true; }
-    if (transportRun && extStepFlag) { extStepFlag = false; fireStep = true; }
+    if (transportRun && extStepFlag) { --extStepFlag; fireStep = true; }
     interrupts();
 
     if (fireStart) {
@@ -303,12 +311,17 @@ void clock::service()
 
   // ---------------- Internal clock path ----------------
   unsigned long now = micros();
-  const float usPerQuarter = 60.0f / bpm * 1e6f;
-  const float usPerTick    = usPerQuarter / PPQN;
+  const float usPerQuarter  = 60.0f / bpm * 1e6f;
+  const float usPerTick     = usPerQuarter / PPQN;
+  const unsigned long tickWhole = (unsigned long)usPerTick; // integer part (e.g. 20833 at 120 BPM)
 
-  if (now - lastIntUs > 2 * usPerTick) lastIntUs = now;
-  if (now - lastIntUs >= usPerTick) {
-    lastIntUs += usPerTick;
+  if (now - lastIntUs > 2 * tickWhole) { lastIntUs = now; fracCarry = 0.0f; }
+  if (now - lastIntUs >= tickWhole) {
+    // Accumulate the fractional µs; when it exceeds 1µs, fold it into lastIntUs
+    fracCarry += usPerTick - (float)tickWhole;
+    unsigned long bonus = (unsigned long)fracCarry;
+    fracCarry -= (float)bonus;
+    lastIntUs += tickWhole + bonus;
     MIDI.sendRealTime(midi::Clock);
 
     // Apply queued PPS change exactly at boundary

@@ -1,4 +1,5 @@
 // --- main.ino -------------------------------------------------
+// Last modified: 2026-05-31
 // ========= USER SETTINGS =========
 #define QM_MIDI_CHANNEL 1   // ← set your global MIDI channel here (1..16)
 // =================================
@@ -107,53 +108,4 @@ void loop()
 
   prevOn = on;
 
-  // dbgPrint();   // optional: enable if you want periodic debug prints
-}
-
-/* ---------- Optional debug helper ---------- */
-void dbgPrint()
-{
-  static unsigned long lastMs = 0;
-  static uint8_t prevStart = 0, prevEnd = 0;
-  static uint8_t prevPP    = 0;
-  static bool    pendingEdge = false;   // latch Destruct press
-
-  /* latch the edge immediately */
-  if (hw::btnDestruct.edge) pendingEdge = true;
-
-  /* only print a few times per second */
-  if (millis() - lastMs < 300) return;
-  lastMs = millis();
-
-  bool changed = false;
-
-  /* loop-pots */
-  if (hw::pots.loopStart != prevStart || hw::pots.loopEnd != prevEnd) {
-    prevStart = hw::pots.loopStart;
-    prevEnd   = hw::pots.loopEnd;
-    changed = true;
-  }
-
-  /* first pitch-prob slider */
-  if (hw::pots.pitchProb[0] != prevPP) {
-    prevPP = hw::pots.pitchProb[0];
-    changed = true;
-  }
-
-  /* latched Destruct edge */
-  if (pendingEdge) changed = true;
-
-  if (!changed) return;
-
-  /* -------- pretty print -------- */
-  /*
-  Serial.print(F("Start="));  Serial.print(prevStart);
-  Serial.print(F(" End="));   Serial.print(prevEnd);
-  Serial.print(F(" PProb1="));Serial.print(prevPP);
-  Serial.print(F(" Destruct="));Serial.print(hw::btnDestruct.level);
-  if (pendingEdge) Serial.print(F("  [EDGE]"));
-  Serial.println();
-  */
-
-  pendingEdge = false;   // clear after showing
 }

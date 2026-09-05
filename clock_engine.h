@@ -23,7 +23,7 @@ namespace clock {
   // (Optional fallback) Apply on next MIDI Start (FA) if you prefer
   extern bool    quantizeDivChangeToStart;   // default false
 
-  // Reserved for future “downbeat” features; not required by grid-quantize
+  // Reserved for future "downbeat" features; not required by grid-quantize
   extern uint8_t beatsPerBar;                // default 4 (unused here)
 
   // ---------- Exposed knobs (read/write) ----------

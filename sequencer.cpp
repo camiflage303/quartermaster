@@ -1,21 +1,4 @@
-// --- sequencer.cpp (use-next-in-pool playback, hard-lock invariant, gradual morph)
-// What’s new in this build:
-// • Pool playback always takes the *next* element (pre-increment) instead of the
-//   one under the cursor. This removes the audible “repeat the last one” feel
-//   at loop/Δ transitions without needing last-played guards.
-// • Pointer advance now sets aPtr := playIdx (since we pre-increment on read),
-//   so we still advance exactly one slot per gated step.
-// • Fully Δ-locked remains invariant: no pointer realign on loop changes; when
-//   entering hard lock, we freeze the current ACTIVE set (target := active).
-// • Easing off hard lock resumes gradual morphing; background rebuild ≤1/step.
-// • NEW: loop-bound-change pool rebuild + pointer align is *skipped* while
-//   using external clock to keep the external step path light.
-//
-// Δ curve patch (this version):
-// • "Mega curve" on Δ so midpoint (~63) already behaves like ~90% hold.
-// • From 63→127, changes are tiny near the top (micro-control).
-// • From 63→0, it drops from ~90% down to 0% across the lower half.
-// • Engines/pool/loop morph behavior remains as in your original design.
+// --- sequencer.cpp ---
 
 #include "sequencer.h"
 #include "hw_inputs.h"
@@ -36,7 +19,7 @@ namespace {
   constexpr uint8_t  kSoftLockStart     = 121; // 121..124: pUse=127, pRe=1
   constexpr uint8_t  kSoftLock_pRe      = 1;
 
-  // Midpoint “hold” target: 90% of 127 ≈ 114
+  // Midpoint "hold" target: 90% of 127 ≈ 114
   constexpr uint8_t  kMidHoldProb       = 114;
 
   struct Track { uint8_t regular[kSteps]={0}; uint8_t prospect[kSteps]={0}; };
@@ -457,9 +440,12 @@ void seq::nextStep()
     }
   };
   // Priority order: Pitch → Oct → VSel
-  maybeBgRebuild(Aspect::Pitch, poolPitch, tP.pRe);
-  maybeBgRebuild(Aspect::Oct,   poolOct,   tO.pRe);
-  maybeBgRebuild(Aspect::VSel,  poolVSel,  tV.pRe);
+  // Skip under external clock to keep nextStep() tight (pools converge via maybeMorph instead)
+  if (!clock::usingExt) {
+    maybeBgRebuild(Aspect::Pitch, poolPitch, tP.pRe);
+    maybeBgRebuild(Aspect::Oct,   poolOct,   tO.pRe);
+    maybeBgRebuild(Aspect::VSel,  poolVSel,  tV.pRe);
+  }
   // ---------------------------------------------------------------------
 
   maybeMorph(poolPitch, tP.pRe);

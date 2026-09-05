@@ -41,7 +41,7 @@ inline void px(uint8_t logicalIndex, uint8_t r, uint8_t g, uint8_t b) {
 }
 
 struct RGB { uint8_t r, g, b; };
-constexpr RGB CLR_OFF {0,0,0}, CLR_OUT{0,0,0}, CLR_L{8,0,0}, CLR_R{8,0,0};
+constexpr RGB CLR_OFF {0,0,0}, CLR_L{8,0,0}, CLR_R{8,0,0};
 constexpr RGB CLR_LOOP{80,80,40}, CLR_GEN{40,40,20};
 
 static inline void readBounds(uint8_t &s, uint8_t &e) {
@@ -96,7 +96,7 @@ static void paintStatic() {
     if      (i == ixL)                c = CLR_L;
     else if (i == ixR)                c = CLR_R;
     else if (inBand(i, lo, hi))       c = seq::vel(i) ? (seq::acc(i) ? vColour(true) : vColour(false)) : CLR_OFF;
-    else                              c = CLR_OUT;
+    else                              c = CLR_OFF;
 
     px(i, c.r, c.g, c.b);
     prevType[i] = (i == ixL) ? 3 : (i == ixR) ? 4 : (seq::vel(i) ? (seq::acc(i) ? 2 : 1) : 0);
@@ -110,13 +110,15 @@ static inline void maybeFlush() {
 
   // Skip one flush immediately after a step while slaved, to avoid coinciding
   // with the tightest timing moment (F8 boundary + nextStep()).
-  if (clock::usingExt) {
-    bool skip = false;
-    noInterrupts();
-    if (clock::stepJustFired) { skip = true; clock::stepJustFired = false; }
-    interrupts();
-    if (skip) return;
+  // Always clear stepJustFired so it doesn't go stale across mode switches.
+  bool stepFired = false;
+  noInterrupts();
+  stepFired = clock::stepJustFired;
+  clock::stepJustFired = false;
+  interrupts();
 
+  if (clock::usingExt) {
+    if (stepFired) return;  // skip flush right at the step boundary
     uint32_t now = micros();
     if (lastFlushUs != 0 && (uint32_t)(now - lastFlushUs) < kMinFlushIntervalUs) return;
     lastFlushUs = now;
@@ -178,7 +180,7 @@ void ui::refresh() {
       else if (prevStep == ixR) c = CLR_R;
       else if (prevStep >= prevLoopLo && prevStep <= prevLoopHi) {
         c = seq::vel(prevStep) ? (seq::acc(prevStep) ? vColour(true) : vColour(false)) : CLR_OFF;
-      } else c = CLR_OUT;
+      } else c = CLR_OFF;
       px(prevStep, c.r, c.g, c.b);
       prevType[prevStep] = (prevStep == ixL) ? 3 : (prevStep == ixR) ? 4 : (seq::vel(prevStep) ? (seq::acc(prevStep) ? 2 : 1) : 0);
     }
